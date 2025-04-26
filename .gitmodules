@@ -1,4 +1,4 @@
 [submodule "submodules/bee-proto"]
 	path = submodules/bee-proto
-	url = ../bee-proto
+	url = https://github.com/ucsd-ets/bee-proto.git
 	branch = main

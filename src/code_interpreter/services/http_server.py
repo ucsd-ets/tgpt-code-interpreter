@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import json
 import logging
 import uuid
@@ -19,7 +20,9 @@ from contextvars import ContextVar
 from typing import List, Dict
 
 from code_interpreter.utils.validation import AbsolutePath, Hash
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
+from json_repair import repair_json
+import fastjsonschema, pathlib, os, json
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -32,6 +35,32 @@ from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExe
 
 logger = logging.getLogger("code_interpreter_service")
 
+SCHEMA_PATH = os.getenv("BEE_SCHEMA_PATH")
+_validate = fastjsonschema.compile(
+    json.loads(pathlib.Path(SCHEMA_PATH).read_text())
+) if SCHEMA_PATH else None
+
+ALIASES = {
+    "sourceCode": "source_code",
+    "code":       "source_code",
+    "timeoutSeconds": "timeout",
+}
+_CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
+
+def camel_to_snake(name: str) -> str:
+    return _CAMEL_RE.sub("_", name).lower()
+
+def canonicalise(obj):
+    """Recursively normalise dict keys to snake_case and apply ALIASES."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            k2 = ALIASES.get(k, camel_to_snake(k))
+            out[k2] = canonicalise(v)
+        return out
+    if isinstance(obj, list):
+        return [canonicalise(i) for i in obj]
+    return obj
 
 class ExecuteRequest(BaseModel):
     source_code: str
@@ -88,8 +117,50 @@ def create_http_server(
 
     @app.post("/v1/execute", response_model=ExecuteResponse)
     async def execute(
-        request: ExecuteRequest, request_id: str = Depends(set_request_id)
+        raw_request: Request,
+        request_id: str = Depends(set_request_id),
     ):
+        """
+        1. Read the raw body.
+        2. json.loads → if broken, fall back to json-repair.
+        3. Unwrap {"requestBody": {...}} wrappers.
+        4. Canonicalise keys (aliases + camel→snake).
+        5. Optionally validate against BEE_SCHEMA_PATH.
+        6. Cast to ExecuteRequest and run the sandbox.
+        """
+        logger.info("Sanitizing incoming request")
+
+        # 1. grab bytes
+        raw_bytes = await raw_request.body()
+
+        # 2. parse or repair
+        try:
+            payload = json.loads(raw_bytes)
+        except json.JSONDecodeError:
+            try:
+                fixed = repair_json(raw_bytes.decode())
+                payload = json.loads(fixed)
+                logger.debug("json-repair applied")
+            except Exception as e:
+                raise HTTPException(422, f"json-repair failed: {e}") from e
+
+        # 3. drop unnecessary wrapper
+        if isinstance(payload, dict) and set(payload) == {"requestBody"}:
+            payload = payload["requestBody"]
+
+        # 4. canonicalise keys (aliases, camel→snake)
+        payload = canonicalise(payload)
+
+        # 5. schema validation (if _validate is configured)
+        if _validate:
+            try:
+                _validate(payload)
+            except Exception as e:
+                raise HTTPException(422, f"schema validation failed: {e}") from e
+
+        # 6. pydantic cast → your existing model
+        request = ExecuteRequest.model_validate(payload)
+
         logger.info(
             "Executing code with files %s: %s", request.files, request.source_code
         )
@@ -102,6 +173,7 @@ def create_http_server(
         except Exception as e:
             logger.exception("Error executing code")
             raise HTTPException(status_code=500, detail=str(e))
+
         logger.info("Code execution completed with result %s", result)
         return result
 

@@ -300,3 +300,15 @@ def test_execute_custom_tool_with_env(http_client: httpx.Client):
     assert response.status_code == 200
     response_json = response.json()
     assert json.loads(response_json["tool_output_json"]) == "Hello John Doe"
+
+def test_bad_source_code_key_name(http_client: httpx.Client):
+    request_data = {
+        "sourceCode": Path("./examples/cowsay.py").read_text(),
+        "files": {},
+    }
+    response = http_client.post("/v1/execute", json=request_data)
+    assert response.status_code == 200
+    response_json = response.json()
+    assert (
+        "Hello World" in response_json["stdout"]
+    ), "Hello World not found in the output"
