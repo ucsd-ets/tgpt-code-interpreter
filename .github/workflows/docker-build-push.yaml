@@ -34,27 +34,27 @@ jobs:
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and load tgpt-code-interpreter image
+      - name: Build and push tgpt-code-interpreter image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          load: true
+          push: true
           tags: |
-            localhost/tgpt-code-interpreter:local
             ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
+            ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
           cache-from: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-interpreter:buildcache
           cache-to: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-interpreter:buildcache,mode=max
 
-      - name: Build and load tgpt-code-executor image
+      - name: Build and push tgpt-code-executor image
         uses: docker/build-push-action@v6
         with:
           context: ./executor
           platforms: linux/amd64,linux/arm64
-          load: true
+          push: true
           tags: |
-            localhost/tgpt-code-executor:local
             ghcr.io/ucsd-ets/tgpt-code-executor:latest
+            ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
           cache-from: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-executor:buildcache
           cache-to: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-executor:buildcache,mode=max
 
@@ -82,21 +82,3 @@ jobs:
           nohup bash -c 'poetry run poe run' &
           sleep 10
           poetry run poe test
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push latest images
-        run: |
-          docker push ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
-          docker push ghcr.io/ucsd-ets/tgpt-code-executor:latest
-
-      - name: Push version tags
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          docker push ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
-          docker push ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
