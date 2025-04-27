@@ -1,3 +1,4 @@
+# .github/workflows/test-image.yml
 name: Test Existing Docker Images
 
 on:
@@ -48,16 +49,19 @@ jobs:
       - name: Load images into KinD
         run: |
           kind load docker-image ghcr.io/ucsd-ets/tgpt-code-interpreter:latest --name kind
-          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:latest    --name kind
+          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:latest --name kind
 
       - name: Deploy to KinD
         run: |
           kubectl delete -f k8s/pull.yaml || true
-          kubectl apply  -f k8s/pull.yaml
+          kubectl apply -f k8s/pull.yaml
           kubectl wait --for=condition=Ready pod/code-interpreter-service
 
       - name: Describe the Pod
         run: kubectl describe pod code-interpreter-service
+
+      - name: Dump Pod logs
+        run: kubectl logs pod/code-interpreter-service
 
       - name: Install Poetry & deps
         uses: abatilo/actions-poetry@v2
@@ -68,15 +72,19 @@ jobs:
         run: poetry install --no-interaction --no-ansi
 
       - name: Port-forward & run integration tests
+        env:
+          APP_GRPC_LISTEN_ADDR: 127.0.0.1:50051
         run: |
+          # start port-forward in the same shell
           kubectl port-forward pod/code-interpreter-service 50051:50051 50081:50081 &
+          # wait up to 30s for gRPC port
           for i in {1..30}; do
             if echo > /dev/tcp/127.0.0.1/50051 2>/dev/null; then
-              echo "gRPC port is open, proceeding with tests"
+              echo "gRPC port is open"
               break
             fi
             echo "Waiting for gRPC port to open… ($i/30)"
-            kubectl describe pod code-interpreter-service
             sleep 1
           done
-          poetry run poe test
+          # give health check up to 60s
+          timeout 60s poetry run poe test
