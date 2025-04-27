@@ -1,31 +1,20 @@
-# Copyright 2024 IBM Corp.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-
 import re
 import json
 import logging
 import uuid
 from contextvars import ContextVar
 from typing import List, Dict, Union
-
-from code_interpreter.utils.validation import AbsolutePath, Hash
-from fastapi import FastAPI, HTTPException, Depends, status, Body
-from json_repair import repair_json
-import fastjsonschema
 import pathlib
 import os
+
+import fastjsonschema
+from json_repair import repair_json
+
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from code_interpreter.utils.validation import AbsolutePath, Hash
 from code_interpreter.services.custom_tool_executor import (
     CustomToolExecuteError,
     CustomToolExecutor,
@@ -35,26 +24,23 @@ from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExe
 
 logger = logging.getLogger("code_interpreter_service")
 
+# Optional JSON‐schema validation, if BEE_SCHEMA_PATH is set
 SCHEMA_PATH = os.getenv("BEE_SCHEMA_PATH")
 _validate = (
-    fastjsonschema.compile(
-        json.loads(pathlib.Path(SCHEMA_PATH).read_text())
-    )
+    fastjsonschema.compile(json.loads(pathlib.Path(SCHEMA_PATH).read_text()))
     if SCHEMA_PATH
     else None
 )
 
+# Aliases and camel→snake conversion
 ALIASES = {
     "sourceCode": "source_code",
     "code": "source_code",
     "timeoutSeconds": "timeout",
 }
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
-
-
 def camel_to_snake(name: str) -> str:
     return _CAMEL_RE.sub("_", name).lower()
-
 
 def canonicalise(obj):
     """Recursively normalize dict keys to snake_case and apply ALIASES."""
@@ -68,12 +54,11 @@ def canonicalise(obj):
         return [canonicalise(i) for i in obj]
     return obj
 
-
+# Pydantic models
 class ExecuteRequest(BaseModel):
     source_code: str
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
-
 
 class ExecuteResponse(BaseModel):
     stdout: str
@@ -81,34 +66,27 @@ class ExecuteResponse(BaseModel):
     exit_code: int
     files: Dict[AbsolutePath, Hash]
 
-
 class ParseCustomToolRequest(BaseModel):
     tool_source_code: str
-
 
 class ParseCustomToolResponse(BaseModel):
     tool_name: str
     tool_input_schema_json: str
     tool_description: str
 
-
 class ParseCustomToolErrorResponse(BaseModel):
     error_messages: List[str]
-
 
 class ExecuteCustomToolRequest(BaseModel):
     tool_source_code: str
     tool_input_json: str
     env: Dict[str, str] = {}
 
-
 class ExecuteCustomToolResponse(BaseModel):
     tool_output_json: str
 
-
 class ExecuteCustomToolErrorResponse(BaseModel):
     stderr: str
-
 
 def create_http_server(
     code_executor: KubernetesCodeExecutor,
@@ -123,48 +101,34 @@ def create_http_server(
         return request_id
 
     @app.post("/v1/execute", response_model=ExecuteResponse)
-    async def execute(
-        raw_input: Union[dict, str] = Body(
-            ...,
-            description="Either a JSON object (application/json) matching ExecuteRequest, or raw text (text/plain) containing malformed JSON or Python code"
-        ),
-        request_id: str = Depends(set_request_id),
-    ):
-        """
-        1. FastAPI will deserialize JSON bodies into dicts, or plain-text into str.
-        2. If dict → assume valid JSON envelope and skip repair.
-        3. If str → attempt repair_json + json.loads, or error 422.
-        4. Unwrap {"requestBody": {...}} if present.
-        5. Canonicalise keys (aliases + camel→snake).
-        6. Validate against BEE_SCHEMA_PATH if configured.
-        7. Cast to ExecuteRequest and invoke the sandbox executor.
-        """
+    async def execute(request: Request, request_id: str = Depends(set_request_id)):
         logger.info("Sanitizing incoming request")
+        # 1. Read raw body
+        raw = await request.body()
+        raw_text = raw.decode("utf-8", errors="replace")
 
-        # 2 & 3. Normalize to payload dict
-        if isinstance(raw_input, dict):
-            payload = raw_input
-        else:
-            # raw_input is str → repair & parse
+        # 2. Try json.loads
+        try:
+            payload = json.loads(raw_text)
+        except Exception:
+            # 3. Try repair_json → json.loads
             try:
-                fixed = repair_json(raw_input)
+                fixed = repair_json(raw_text)
                 logger.debug("json-repair applied")
                 payload = json.loads(fixed)
             except Exception as e:
-                logger.error("json-repair / parsing failed", exc_info=True)
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid JSON and repair failed: {e}"
-                ) from e
+                # 4. Fallback: treat entire body as source code
+                logger.debug("json-repair failed (%s), falling back to raw source_code", e)
+                payload = {"source_code": raw_text, "files": {}, "env": {}}
 
-        # 4. Drop wrapper if present
-        if isinstance(payload, dict) and set(payload) == {"requestBody"}:
+        # 5. Unwrap {"requestBody": {...}} if present
+        if isinstance(payload, dict) and set(payload.keys()) == {"requestBody"}:
             payload = payload["requestBody"]
 
-        # 5. Canonicalise keys
+        # 6. Canonicalise
         payload = canonicalise(payload)
 
-        # 6. Optional JSON Schema validation
+        # 7. JSON‐schema validation
         if _validate:
             try:
                 _validate(payload)
@@ -174,33 +138,35 @@ def create_http_server(
                     detail=f"Schema validation failed: {e}"
                 ) from e
 
-        # 7. Pydantic model and execution
-        request = ExecuteRequest.model_validate(payload)
-        logger.info(
-            "Executing code with files %s: %s", request.files, request.source_code
-        )
+        # 8. Pydantic coercion
+        try:
+            req = ExecuteRequest.model_validate(payload)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid request format: {e}"
+            ) from e
+
+        logger.info("Executing code with files %s", req.files)
         try:
             result = await code_executor.execute(
-                source_code=request.source_code,
-                files=request.files,
-                env=request.env,
+                source_code=req.source_code,
+                files=req.files,
+                env=req.env,
             )
         except Exception as e:
             logger.exception("Error executing code")
             raise HTTPException(status_code=500, detail=str(e))
 
-        logger.info("Code execution completed with result %s", result)
+        logger.info("Code execution completed")
         return result
 
-    @app.post(
-        "/v1/parse-custom-tool",
-        response_model=ParseCustomToolResponse,
-    )
+    @app.post("/v1/parse-custom-tool", response_model=ParseCustomToolResponse)
     async def parse_custom_tool(
         request: ParseCustomToolRequest,
-        request_id: str = Depends(set_request_id)
+        request_id: str = Depends(set_request_id),
     ):
-        logger.info("Parsing custom tool with source code")
+        logger.info("Parsing custom tool source")
         custom_tool = custom_tool_executor.parse(
             tool_source_code=request.tool_source_code
         )
@@ -218,25 +184,22 @@ def create_http_server(
             content=ParseCustomToolErrorResponse(error_messages=e.errors).model_dump(),
         )
 
-    @app.post(
-        "/v1/execute-custom-tool",
-        response_model=ExecuteCustomToolResponse,
-    )
+    @app.post("/v1/execute-custom-tool", response_model=ExecuteCustomToolResponse)
     async def execute_custom_tool(
         request: ExecuteCustomToolRequest,
         request_id: str = Depends(set_request_id),
     ):
-        logger.info("Executing custom tool with source code")
-        result = await custom_tool_executor.execute(
+        logger.info("Executing custom tool")
+        output = await custom_tool_executor.execute(
             tool_input_json=request.tool_input_json,
             tool_source_code=request.tool_source_code,
             env=request.env,
         )
-        return ExecuteCustomToolResponse(tool_output_json=json.dumps(result))
+        return ExecuteCustomToolResponse(tool_output_json=json.dumps(output))
 
     @app.exception_handler(CustomToolExecuteError)
     async def handle_execute_error(request, e):
-        logger.warning("Error executing custom tool: %s", e)
+        logger.warning("Custom tool execution error: %s", e)
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content=ExecuteCustomToolErrorResponse(stderr=str(e)).model_dump(),

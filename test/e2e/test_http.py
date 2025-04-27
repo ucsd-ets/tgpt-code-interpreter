@@ -315,7 +315,6 @@ def test_bad_source_code_key_name(http_client: httpx.Client):
         "Hello World" in response_json["stdout"]
     ), "Hello World not found in the output"
 
-'''
 def test_missing_comma_between_fields(http_client: httpx.Client):
     code = Path("./examples/basic.py").read_text()
     # forgot the comma between sourceCode and files
@@ -383,4 +382,3 @@ def test_alias_and_camelcase_keys_with_error(http_client: httpx.Client):
     )
     assert resp.status_code == 200
     assert "Hello World" in resp.json()["stdout"]
-'''
