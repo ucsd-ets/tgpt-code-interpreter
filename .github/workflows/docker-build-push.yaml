@@ -60,14 +60,3 @@ jobs:
           push: true
           tags: |
             ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }}
-
-      - name: Tag & push version-specific images
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          docker tag ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.BRANCH_OR_TAG }} \
-                     ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
-          docker push ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
-
-          docker tag ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }} \
-                     ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
-          docker push ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
