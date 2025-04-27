@@ -134,6 +134,7 @@ def create_http_server(
         raw_bytes = await raw_request.body()
 
         # 2. parse or repair
+        '''
         try:
             payload = json.loads(raw_bytes)
         except json.JSONDecodeError:
@@ -143,6 +144,7 @@ def create_http_server(
                 logger.debug("json-repair applied")
             except Exception as e:
                 raise HTTPException(422, f"json-repair failed: {e}") from e
+        '''
         payload = json.loads(raw_bytes)
 
         # 3. drop unnecessary wrapper

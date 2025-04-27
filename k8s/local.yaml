@@ -33,7 +33,7 @@ spec:
   serviceAccountName: code-interpreter-sa
   containers:
   - name: code-interpreter-service
-    image: localhost/bee-code-interpreter:local
+    image: localhost/tgpt-code-interpreter:local
     ports:
     - containerPort: 50051
     - containerPort: 50081
