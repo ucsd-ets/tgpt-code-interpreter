@@ -29,7 +29,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull & retag images to “latest”
+      - name: Pull & retag to latest
         run: |
           docker pull ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }}
           docker pull ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }}
@@ -56,6 +56,9 @@ jobs:
           kubectl apply  -f k8s/pull.yaml
           kubectl wait --for=condition=Ready pod/code-interpreter-service
 
+      - name: Describe the Pod
+        run: kubectl describe pod code-interpreter-service
+
       - name: Install Poetry & deps
         uses: abatilo/actions-poetry@v2
         with:
@@ -64,10 +67,16 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-ansi
 
-      - name: Port-forward + Run integration tests
+      - name: Port-forward & run integration tests
         run: |
-          # start port-forward in the same shell
           kubectl port-forward pod/code-interpreter-service 50051:50051 50081:50081 &
-          sleep 5
-          # now run your health-check and full test suite
+          for i in {1..30}; do
+            if echo > /dev/tcp/127.0.0.1/50051 2>/dev/null; then
+              echo "gRPC port is open, proceeding with tests"
+              break
+            fi
+            echo "Waiting for gRPC port to open… ($i/30)"
+            kubectl describe pod code-interpreter-service
+            sleep 1
+          done
           poetry run poe test
