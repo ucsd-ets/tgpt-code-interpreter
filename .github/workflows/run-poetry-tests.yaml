@@ -29,23 +29,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull & retag to latest
+      - name: Pull & retag images to “latest”
         run: |
           docker pull ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }}
           docker pull ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }}
-          docker tag ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }} \
-                     ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
-          docker tag ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }} \
-                     ghcr.io/ucsd-ets/tgpt-code-executor:latest
+          docker tag \
+            ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }} \
+            ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
+          docker tag \
+            ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }} \
+            ghcr.io/ucsd-ets/tgpt-code-executor:latest
 
-      - uses: engineerd/setup-kind@v0.6.2
+      - name: Set up KinD cluster
+        uses: engineerd/setup-kind@v0.6.2
         with:
           version: v0.24.0
 
       - name: Load images into KinD
         run: |
           kind load docker-image ghcr.io/ucsd-ets/tgpt-code-interpreter:latest --name kind
-          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:latest --name kind
+          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:latest    --name kind
 
       - name: Deploy to KinD
         run: |
@@ -53,17 +56,18 @@ jobs:
           kubectl apply  -f k8s/pull.yaml
           kubectl wait --for=condition=Ready pod/code-interpreter-service
 
-      - name: Port-forward pod
-        run: |
-          kubectl port-forward pod/code-interpreter-service 50051:50051 50081:50081 &
-          sleep 5
-
-      - uses: abatilo/actions-poetry@v2
+      - name: Install Poetry & deps
+        uses: abatilo/actions-poetry@v2
         with:
           poetry-version: latest
 
       - name: Install dependencies
         run: poetry install --no-interaction --no-ansi
 
-      - name: Run integration tests
-        run: poetry run poe test
+      - name: Port-forward + Run integration tests
+        run: |
+          # start port-forward in the same shell
+          kubectl port-forward pod/code-interpreter-service 50051:50051 50081:50081 &
+          sleep 5
+          # now run your health-check and full test suite
+          poetry run poe test
