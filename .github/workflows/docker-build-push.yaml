@@ -61,7 +61,7 @@ jobs:
         run: bash scripts/run-build.sh
 
       - name: Create KinD cluster for integration tests
-        uses: engineerd/setup-kind@v0.6.0
+        uses: engineerd/setup-kind@v0.6.2
         with:
           version: v0.24.0
 
