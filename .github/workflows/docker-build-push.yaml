@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - '**'    # all branches
+      - '**'
     tags:
       - 'v*'
 
@@ -35,7 +35,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from tag
+      - name: Extract version from ref
         id: get_version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -43,7 +43,7 @@ jobs:
           fi
           echo "BRANCH_OR_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_OUTPUT
 
-      - name: Build and push tgpt-code-interpreter image (branch/tag)
+      - name: Build & push interpreter image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -51,10 +51,8 @@ jobs:
           push: true
           tags: |
             ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.BRANCH_OR_TAG }}
-          cache-from: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-interpreter:buildcache
-          cache-to: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-interpreter:buildcache,mode=max
 
-      - name: Build and push tgpt-code-executor image (branch/tag)
+      - name: Build & push executor image
         uses: docker/build-push-action@v6
         with:
           context: ./executor
@@ -62,21 +60,17 @@ jobs:
           push: true
           tags: |
             ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }}
-          cache-from: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-executor:buildcache
-          cache-to: type=registry,ref=ghcr.io/ucsd-ets/tgpt-code-executor:buildcache,mode=max
 
-      - name: Tag and push version-specific images
+      - name: Tag & push version-specific images
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker pull ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.BRANCH_OR_TAG }}
-          docker tag ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.BRANCH_OR_TAG }} ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
+          docker tag ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.BRANCH_OR_TAG }} \
+                     ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
           docker push ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ steps.get_version.outputs.VERSION }}
-          docker pull ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }}
-          docker tag ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }} ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
-          docker push ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
 
-      - name: Run repository build script
-        run: bash scripts/run-build.sh
+          docker tag ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.BRANCH_OR_TAG }} \
+                     ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
+          docker push ghcr.io/ucsd-ets/tgpt-code-executor:${{ steps.get_version.outputs.VERSION }}
 
       - name: Create KinD cluster for integration tests
         uses: engineerd/setup-kind@v0.6.2

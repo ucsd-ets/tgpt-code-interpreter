@@ -9,20 +9,20 @@
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import re
 import json
 import logging
 import uuid
 from contextvars import ContextVar
-from typing import List, Dict
+from typing import List, Dict, Union
 
 from code_interpreter.utils.validation import AbsolutePath, Hash
-from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi import FastAPI, HTTPException, Depends, status, Body
 from json_repair import repair_json
-import fastjsonschema, pathlib, os, json
+import fastjsonschema
+import pathlib
+import os
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -36,22 +36,28 @@ from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExe
 logger = logging.getLogger("code_interpreter_service")
 
 SCHEMA_PATH = os.getenv("BEE_SCHEMA_PATH")
-_validate = fastjsonschema.compile(
-    json.loads(pathlib.Path(SCHEMA_PATH).read_text())
-) if SCHEMA_PATH else None
+_validate = (
+    fastjsonschema.compile(
+        json.loads(pathlib.Path(SCHEMA_PATH).read_text())
+    )
+    if SCHEMA_PATH
+    else None
+)
 
 ALIASES = {
     "sourceCode": "source_code",
-    "code":       "source_code",
+    "code": "source_code",
     "timeoutSeconds": "timeout",
 }
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 
+
 def camel_to_snake(name: str) -> str:
     return _CAMEL_RE.sub("_", name).lower()
 
+
 def canonicalise(obj):
-    """Recursively normalise dict keys to snake_case and apply ALIASES."""
+    """Recursively normalize dict keys to snake_case and apply ALIASES."""
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
@@ -61,6 +67,7 @@ def canonicalise(obj):
     if isinstance(obj, list):
         return [canonicalise(i) for i in obj]
     return obj
+
 
 class ExecuteRequest(BaseModel):
     source_code: str
@@ -117,53 +124,58 @@ def create_http_server(
 
     @app.post("/v1/execute", response_model=ExecuteResponse)
     async def execute(
-        raw_request: Request,
+        raw_input: Union[dict, str] = Body(
+            ...,
+            description="Either a JSON object (application/json) matching ExecuteRequest, or raw text (text/plain) containing malformed JSON or Python code"
+        ),
         request_id: str = Depends(set_request_id),
     ):
         """
-        1. Read the raw body.
-        2. json.loads → if broken, fall back to json-repair.
-        3. Unwrap {"requestBody": {...}} wrappers.
-        4. Canonicalise keys (aliases + camel→snake).
-        5. Optionally validate against BEE_SCHEMA_PATH.
-        6. Cast to ExecuteRequest and run the sandbox.
+        1. FastAPI will deserialize JSON bodies into dicts, or plain-text into str.
+        2. If dict → assume valid JSON envelope and skip repair.
+        3. If str → attempt repair_json + json.loads, or error 422.
+        4. Unwrap {"requestBody": {...}} if present.
+        5. Canonicalise keys (aliases + camel→snake).
+        6. Validate against BEE_SCHEMA_PATH if configured.
+        7. Cast to ExecuteRequest and invoke the sandbox executor.
         """
         logger.info("Sanitizing incoming request")
 
-        # 1. grab bytes
-        raw_bytes = await raw_request.body()
-
-        # 2. parse or repair
-        '''
-        try:
-            payload = json.loads(raw_bytes)
-        except json.JSONDecodeError:
+        # 2 & 3. Normalize to payload dict
+        if isinstance(raw_input, dict):
+            payload = raw_input
+        else:
+            # raw_input is str → repair & parse
             try:
-                fixed = repair_json(raw_bytes.decode())
-                payload = json.loads(fixed)
+                fixed = repair_json(raw_input)
                 logger.debug("json-repair applied")
+                payload = json.loads(fixed)
             except Exception as e:
-                raise HTTPException(422, f"json-repair failed: {e}") from e
-        '''
-        payload = json.loads(raw_bytes)
+                logger.error("json-repair / parsing failed", exc_info=True)
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid JSON and repair failed: {e}"
+                ) from e
 
-        # 3. drop unnecessary wrapper
+        # 4. Drop wrapper if present
         if isinstance(payload, dict) and set(payload) == {"requestBody"}:
             payload = payload["requestBody"]
 
-        # 4. canonicalise keys (aliases, camel→snake)
+        # 5. Canonicalise keys
         payload = canonicalise(payload)
 
-        # 5. schema validation (if _validate is configured)
+        # 6. Optional JSON Schema validation
         if _validate:
             try:
                 _validate(payload)
             except Exception as e:
-                raise HTTPException(422, f"schema validation failed: {e}") from e
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Schema validation failed: {e}"
+                ) from e
 
-        # 6. pydantic cast → your existing model
+        # 7. Pydantic model and execution
         request = ExecuteRequest.model_validate(payload)
-
         logger.info(
             "Executing code with files %s: %s", request.files, request.source_code
         )
@@ -185,22 +197,21 @@ def create_http_server(
         response_model=ParseCustomToolResponse,
     )
     async def parse_custom_tool(
-        request: ParseCustomToolRequest, request_id: str = Depends(set_request_id)
+        request: ParseCustomToolRequest,
+        request_id: str = Depends(set_request_id)
     ):
-        logger.info("Parsing custom tool with source code %s", request.tool_source_code)
+        logger.info("Parsing custom tool with source code")
         custom_tool = custom_tool_executor.parse(
             tool_source_code=request.tool_source_code
         )
-        result = ParseCustomToolResponse(
+        return ParseCustomToolResponse(
             tool_name=custom_tool.name,
             tool_input_schema_json=json.dumps(custom_tool.input_schema),
             tool_description=custom_tool.description,
         )
-        logger.info("Parsed custom tool %s", result)
-        return result
 
     @app.exception_handler(CustomToolParseError)
-    async def validation_exception_handler(request, e):
+    async def handle_parse_error(request, e):
         logger.warning("Invalid custom tool: %s", e.errors)
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -215,19 +226,16 @@ def create_http_server(
         request: ExecuteCustomToolRequest,
         request_id: str = Depends(set_request_id),
     ):
-        logger.info(
-            "Executing custom tool with source code %s", request.tool_source_code
-        )
+        logger.info("Executing custom tool with source code")
         result = await custom_tool_executor.execute(
             tool_input_json=request.tool_input_json,
             tool_source_code=request.tool_source_code,
             env=request.env,
         )
-        logger.info("Executed custom tool with result %s", result)
         return ExecuteCustomToolResponse(tool_output_json=json.dumps(result))
 
     @app.exception_handler(CustomToolExecuteError)
-    async def validation_exception_handler(request, e):
+    async def handle_execute_error(request, e):
         logger.warning("Error executing custom tool: %s", e)
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,

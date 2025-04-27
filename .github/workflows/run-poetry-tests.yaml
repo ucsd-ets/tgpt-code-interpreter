@@ -1,0 +1,60 @@
+name: Test Existing Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch or tag to test (e.g. main or v1.2.3)'
+        required: true
+        default: 'main'
+
+jobs:
+  test-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+
+    steps:
+      - name: Check out code (for tests & manifests)
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull & retag interpreter image
+        run: |
+          docker pull ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }}
+          docker tag  ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }} localhost/tgpt-code-interpreter:local
+
+      - name: Pull & retag executor image
+        run: |
+          docker pull ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }}
+          docker tag  ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }} localhost/tgpt-code-executor:local
+
+      - name: Create KinD cluster
+        uses: engineerd/setup-kind@v0.6.2
+        with:
+          version: v0.24.0
+
+      - name: Wait for Kubernetes API
+        run: kubectl cluster-info
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v2
+        with:
+          poetry-version: latest
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Run integration tests
+        run: |
+          nohup bash -c 'poetry run poe run' &
+          sleep 10
+          poetry run poe test
