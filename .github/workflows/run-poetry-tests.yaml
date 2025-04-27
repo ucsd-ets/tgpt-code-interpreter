@@ -22,14 +22,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Init & update submodules
-        run: git submodule update --init --recursive
-
-      - name: Ensure bee-proto stubs are importable
-        run: |
-          find submodules/bee-proto/gen/python -type d \
-            -exec touch {}/__init__.py \;
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -37,10 +29,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull interpreter & executor images
+      - name: Pull & retag images to “latest”
         run: |
           docker pull ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }}
           docker pull ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }}
+          docker tag \
+            ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }} \
+            ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
+          docker tag \
+            ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }} \
+            ghcr.io/ucsd-ets/tgpt-code-executor:latest
 
       - name: Set up KinD cluster
         uses: engineerd/setup-kind@v0.6.2
@@ -49,8 +47,8 @@ jobs:
 
       - name: Load images into KinD
         run: |
-          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-interpreter:${{ github.event.inputs.branch }} --name kind
-          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:${{ github.event.inputs.branch }} --name kind
+          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-interpreter:latest --name kind
+          kind load docker-image ghcr.io/ucsd-ets/tgpt-code-executor:latest --name kind
 
       - name: Deploy to KinD
         run: |
@@ -58,12 +56,12 @@ jobs:
           kubectl apply  -f k8s/pull.yaml
           kubectl wait --for=condition=Ready pod/code-interpreter-service
 
-      - name: Port-forward service
+      - name: Port-forward pod
         run: |
-          sleep 3
-          kubectl port-forward svc/code-interpreter-service 50051:50051 50081:50081 &
+          kubectl port-forward pod/code-interpreter-service 50051:50051 50081:50081 &
+          sleep 5
 
-      - name: Install Poetry
+      - name: Install Poetry & deps
         uses: abatilo/actions-poetry@v2
         with:
           poetry-version: latest

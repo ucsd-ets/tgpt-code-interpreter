@@ -33,7 +33,7 @@ spec:
   serviceAccountName: code-interpreter-sa
   containers:
   - name: code-interpreter-service
-    image: icr.io/i-am-bee/bee-code-interpreter:latest
+    image: ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
     ports:
     - containerPort: 50051
     - containerPort: 50081
@@ -41,4 +41,4 @@ spec:
     - name: APP_FILE_STORAGE_PATH
       value: /storage
     - name: APP_EXECUTOR_IMAGE
-      value: icr.io/i-am-bee/bee-code-executor:latest
+      value: ghcr.io/ucsd-ets/tgpt-code-executor:latest
