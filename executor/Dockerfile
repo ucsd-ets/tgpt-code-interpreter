@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG GO_VERSION="1.23"
-ARG UPM_VERSION="2.5.2"
-ARG ALPINE_VERSION="3.20"
-ARG RUST_VERSION="1.81"
-ARG PYTHON_VERSION="3.12"
+ARG GO_VERSION="1.24.2"
+ARG UPM_VERSION="2.7.6"
+ARG ALPINE_VERSION="3.21"
+ARG RUST_VERSION="1.86"
+ARG PYTHON_VERSION="3.13.3"
+ARG MAJOR_PYTHON_VERSION="3.13"
 ARG UID="1001050000"
 
 FROM docker.io/rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS build-executor-server
@@ -38,7 +39,7 @@ RUN apk add --no-cache git make gcc g++ musl-dev && \
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS build-pymupdf
 RUN apk add --no-cache gcc musl-dev linux-headers make g++ clang-dev python3 python3-dev py3-pip && \
-    pip install --target /out pymupdf==1.24.12
+    pip install --target /out pymupdf
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS runtime
 RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
@@ -100,36 +101,42 @@ RUN echo "executor:x:${UID}:${UID}::/home/executor:" >> /etc/passwd && \
 USER executor
 
 # Cache fonts
-RUN fc-cache -fv && python -c "import matplotlib.pyplot"
+RUN fc-cache -fv && python3 -c "import matplotlib.pyplot"
 
-# Python
+# Python virtual environment
 ARG PYTHON_VERSION
+RUN python3 -m venv --system-site-packages /venv
 COPY requirements.txt requirements-skip.txt /
-RUN python -m venv --system-site-packages /venv && /venv/bin/pip install --no-cache-dir -r /requirements.txt
-COPY sitecustomize.py /venv/lib/python${PYTHON_VERSION}/site-packages
-ENV PATH="/venv/bin:$PATH"
-ENV PYTHONPATH="/venv/lib/python${PYTHON_VERSION}/site-packages/"
+RUN /venv/bin/pip install --no-cache-dir -r /requirements.txt && \
+    /venv/bin/pip install --no-cache-dir cowsay
 
-# Pandoc
+# Site customization for Python ${PYTHON_VERSION}
+ARG MAJOR_PYTHON_VERSION
+COPY sitecustomize.py /venv/lib/python${MAJOR_PYTHON_VERSION}/site-packages/
+
+# Environment variables
+ENV PATH="/venv/bin:$PATH"
+ENV PYTHONPATH="/venv/lib/python${MAJOR_PYTHON_VERSION}/site-packages/"
+
+# Pandoc wrapper
 COPY pandoc-wrapper /usr/local/bin/pandoc
 
-# ffmpeg
+# ffmpeg wrapper
 COPY ffmpeg-wrapper /usr/local/bin/ffmpeg
 ENV IMAGEIO_FFMPEG_EXE=/usr/bin/ffmpeg
 
-# xonsh
+# xonsh settings
 ENV XONSH_SHOW_TRACEBACK=True
 
-# UPM
+# UPM installation
 COPY --from=build-upm /go/bin/upm /usr/local/bin/upm
 COPY --from=build-upm /workdir/upm/internal/backends/python/pypi_map.sqlite /pypi_map.sqlite
 ENV PYPI_MAP_DB=/pypi_map.sqlite
 
-# pymupdf
-ARG PYTHON_VERSION
-COPY --from=build-pymupdf /out/. /venv/lib/python${PYTHON_VERSION}/site-packages/
+# pymupdf integration
+COPY --from=build-pymupdf /out/. /venv/lib/python${MAJOR_PYTHON_VERSION}/site-packages/
 
-# Executor server
+# Executor server binary
 COPY --from=build-executor-server /workdir/target/release/executor-server /usr/local/bin/executor-server
 
 WORKDIR /workspace

@@ -1,2 +1,3 @@
 pandas[excel,plot,output-formatting,computation]
-PyPDF2==2.* # LLaMa 3.1 prefers the older version's API
+PyPDF2
+cowsay

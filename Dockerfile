@@ -1,4 +1,4 @@
-ARG PYTHON_VERSION="3.12"
+ARG PYTHON_VERSION="3.13.3"
 
 FROM docker.io/python:${PYTHON_VERSION} AS builder
 RUN apt-get update &&\

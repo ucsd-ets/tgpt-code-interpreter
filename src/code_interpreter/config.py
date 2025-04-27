@@ -46,6 +46,9 @@ class Config(BaseSettings):
         },
     }
 
+    # path to schema (if it exists)
+    schema_path: str = ""
+
     # the address and port gRPC server will listen on
     grpc_listen_addr: str = "0.0.0.0:50051"
 

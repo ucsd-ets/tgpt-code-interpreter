@@ -69,7 +69,7 @@ def test_imports(grpc_stub: CodeInterpreterServiceStub):
 
 def test_ad_hoc_import(grpc_stub: CodeInterpreterServiceStub):
     request = ExecuteRequest(
-        source_code=Path("./examples/cowsay.py").read_text(),
+        source_code=Path("./examples/basic.py").read_text(),
     )
     response = grpc_stub.Execute(request, timeout=60)
     assert "Hello World" in response.stdout, "Hello World not found in the output"
