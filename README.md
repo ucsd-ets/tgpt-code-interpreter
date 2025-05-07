@@ -73,7 +73,8 @@ This endpoint executes arbitrary Python code in a sandboxed environment, with on
     },
     "env": {
         "ENV_VAR": "value"
-    }
+    },
+    "chat_id": string,
 }
 ```
 

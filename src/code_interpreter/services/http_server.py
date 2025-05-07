@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+from ipaddress import ip_network, ip_address
 import re
 import json
 import logging
@@ -19,12 +21,14 @@ import uuid
 from contextvars import ContextVar
 from typing import List, Dict
 
+from code_interpreter.config import Config
 from code_interpreter.utils.validation import AbsolutePath, Hash
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from json_repair import repair_json
 import fastjsonschema, pathlib, os, json
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.status import HTTP_403_FORBIDDEN, HTTP_410_GONE
 
 from code_interpreter.services.custom_tool_executor import (
     CustomToolExecuteError,
@@ -32,6 +36,8 @@ from code_interpreter.services.custom_tool_executor import (
     CustomToolParseError,
 )
 from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExecutor
+
+from utils.file_meta import check_and_decrement, register
 
 logger = logging.getLogger("code_interpreter_service")
 
@@ -67,13 +73,12 @@ class ExecuteRequest(BaseModel):
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
 
-
 class ExecuteResponse(BaseModel):
     stdout: str
     stderr: str
     exit_code: int
     files: Dict[AbsolutePath, Hash]
-
+    chat_id: str | None = None
 
 class ParseCustomToolRequest(BaseModel):
     tool_source_code: str
@@ -102,6 +107,33 @@ class ExecuteCustomToolResponse(BaseModel):
 class ExecuteCustomToolErrorResponse(BaseModel):
     stderr: str
 
+class FileRequest(BaseModel):
+    chat_id: str
+    file_hash: str
+    filename: str
+
+class FileResponse(BaseModel):
+    filename: str
+    content_type: str
+    content_base64: str
+
+def _is_internal_request(req: Request) -> bool:
+    host_ok = req.headers.get("host", "") in Config.internal_host_allowlist
+    ip_ok = any(
+        ip_address(req.client.host) in ip_network(cidr)
+        for cidr in Config.internal_host_allowlist
+    )
+    return host_ok or ip_ok
+
+
+def _guard_spawn(req: Request):
+    if Config.public_spawn_enabled:
+        return
+    if not _is_internal_request(req):
+        raise HTTPException(
+            HTTP_403_FORBIDDEN,
+            detail="Spawn requests must originate from an internal URL / IP",
+        )
 
 def create_http_server(
     code_executor: KubernetesCodeExecutor,
@@ -115,11 +147,41 @@ def create_http_server(
         request_id_context_var.set(request_id)
         return request_id
 
+    @app.post("/v1/download", response_model=FileResponse)
+    async def download(
+        raw_request: Request,
+        request: FileRequest,
+        request_id: str = Depends(set_request_id),
+    ):
+        # no guard spawn required, download is by default global
+
+        # check sqlite3 DB
+        try:
+            check_and_decrement(file_hash=request.file_hash, chat_id=request.chat_id)
+        except Exception as e:
+            raise HTTPException(401, f"Unable to serve file!") from e
+
+        # if no exception thrown, attempt download
+        filepath = os.path.join(Config.file_storage_path, request.chat_id, request.file_hash)
+        if not os.path.exists(filepath):
+             raise HTTPException(404, f"File {request.file_hash} not found for chat id {str(request.chat_id)}") from e
+
+        with open(filepath, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+
+        return FileResponse(
+            filename="example.pdf",
+            content_type="application/pdf",
+            content_base64=encoded
+        )
+
+
     @app.post("/v1/execute", response_model=ExecuteResponse)
     async def execute(
         raw_request: Request,
         request_id: str = Depends(set_request_id),
     ):
+        _guard_spawn(raw_request)
         """
         1. Read the raw body.
         2. json.loads → if broken, fall back to json-repair.
@@ -161,7 +223,7 @@ def create_http_server(
             except Exception as e:
                 raise HTTPException(422, f"schema validation failed: {e}") from e
 
-        # 6. pydantic cast → your existing model
+        # 6. pydantic cast
         request = ExecuteRequest.model_validate(payload)
 
         logger.info(
@@ -173,6 +235,14 @@ def create_http_server(
                 files=request.files,
                 env=request.env,
             )
+
+            # Store files into sqlite DB
+            for _file_path, _file_hash in result.files.items():
+                register(
+                    file_hash=_file_hash,
+                    chat_id=payload.chat_id,
+                    max_downloads=Config.global_max_downloads,
+                )
         except Exception as e:
             logger.exception("Error executing code")
             raise HTTPException(status_code=500, detail=str(e))
@@ -185,8 +255,9 @@ def create_http_server(
         response_model=ParseCustomToolResponse,
     )
     async def parse_custom_tool(
-        request: ParseCustomToolRequest, request_id: str = Depends(set_request_id)
+        raw_request: Request, request: ParseCustomToolRequest, request_id: str = Depends(set_request_id)
     ):
+        _guard_spawn(raw_request)
         logger.info("Parsing custom tool with source code %s", request.tool_source_code)
         custom_tool = custom_tool_executor.parse(
             tool_source_code=request.tool_source_code
@@ -212,9 +283,11 @@ def create_http_server(
         response_model=ExecuteCustomToolResponse,
     )
     async def execute_custom_tool(
+        raw_request: Request,
         request: ExecuteCustomToolRequest,
         request_id: str = Depends(set_request_id),
     ):
+        _guard_spawn(raw_request)
         logger.info(
             "Executing custom tool with source code %s", request.tool_source_code
         )
@@ -235,3 +308,4 @@ def create_http_server(
         )
 
     return app
+
