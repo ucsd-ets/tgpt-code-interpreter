@@ -1,9 +1,11 @@
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Optional
 from config import Config
 
+import os
 import sqlite3
 
 _DB = Path(Config.file_storage_path) / "file_mgmt_db.sqlite3"
@@ -22,17 +24,30 @@ logger = logging.getLogger("code_interpreter_service")
 
 
 def register(file_hash: str, chat_id: Optional[str], max_downloads: int) -> None:
+    if not file_hash or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', file_hash):
+        logger.warning(f"Invalid file hash format: {file_hash}")
+        return
+        
+    if Config.require_chat_id and not chat_id:
+        logger.warning("Attempted to register file without chat_id when required")
+        return
+    
     remaining = None if max_downloads == 0 else max_downloads
-    _CONN.execute(
-        """
-        INSERT INTO files(file_hash, chat_id, remaining)
-        VALUES (?, ?, ?)
-        ON CONFLICT(file_hash) DO UPDATE
-          SET chat_id   = excluded.chat_id,
-              remaining = excluded.remaining;
-        """,
-        (file_hash, chat_id, remaining),
-    )
+    
+    try:
+        _CONN.execute(
+            """
+            INSERT INTO files(file_hash, chat_id, remaining)
+            VALUES (?, ?, ?)
+            ON CONFLICT(file_hash) DO UPDATE
+              SET chat_id = excluded.chat_id,
+                  remaining = excluded.remaining;
+            """,
+            (file_hash, chat_id, remaining),
+        )
+        logger.debug(f"Registered file {file_hash} for chat {chat_id} with {remaining if remaining is not None else 'unlimited'} downloads")
+    except Exception as e:
+        logger.error(f"Error registering file: {str(e)}")
 
 def check_and_decrement(file_hash: str, chat_id: Optional[str]) -> None:
     row = _CONN.execute(
@@ -57,4 +72,26 @@ def check_and_decrement(file_hash: str, chat_id: Optional[str]) -> None:
         logger.debug(f"Remaining: {str(remaining)}")
         if remaining - 1 <= 0:
             logger.debug(f"Removing file {file_hash}...")
-            _CONN.execute("DELETE FROM files WHERE hash = ?;", (file_hash,))
+            _CONN.execute("DELETE FROM files WHERE file_hash = ?;", (file_hash,))
+
+def cleanup_expired_files():
+    """Remove records with remaining=0 and clean up orphaned files"""
+    try:
+        # Get all expired file records
+        expired = _CONN.execute("SELECT file_hash FROM files WHERE remaining = 0").fetchall()
+        
+        # Delete records from database
+        if expired:
+            _CONN.execute("DELETE FROM files WHERE remaining = 0")
+            
+            # Delete files from disk
+            for (file_hash,) in expired:
+                file_path = os.path.join(Config.file_storage_path, file_hash)
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Deleted expired file: {file_hash}")
+                except Exception as e:
+                    logger.error(f"Error deleting expired file {file_hash}: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error in cleanup task: {str(e)}")

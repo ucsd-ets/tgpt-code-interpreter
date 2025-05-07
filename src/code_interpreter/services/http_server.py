@@ -13,22 +13,25 @@
 # limitations under the License.
 
 import base64
+from collections import defaultdict
 from ipaddress import ip_network, ip_address
 import re
 import json
 import logging
+import time
 import uuid
 from contextvars import ContextVar
 from typing import List, Dict
 
 from code_interpreter.config import Config
 from code_interpreter.utils.validation import AbsolutePath, Hash
-from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks
 from json_repair import repair_json
 import fastjsonschema, pathlib, os, json
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_403_FORBIDDEN, HTTP_410_GONE
+import mimetypes, re
 
 from code_interpreter.services.custom_tool_executor import (
     CustomToolExecuteError,
@@ -37,7 +40,7 @@ from code_interpreter.services.custom_tool_executor import (
 )
 from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExecutor
 
-from utils.file_meta import check_and_decrement, register
+from utils.file_meta import check_and_decrement, cleanup_expired_files, register
 
 logger = logging.getLogger("code_interpreter_service")
 
@@ -140,40 +143,103 @@ def create_http_server(
     custom_tool_executor: CustomToolExecutor,
     request_id_context_var: ContextVar[str],
 ):
+    # vars
     app = FastAPI()
+    
+    RATE_LIMIT = 10  # max requests per minute
+    RATE_WINDOW = 60  # window in seconds
+    ip_request_count = defaultdict(list)
 
     def set_request_id():
         request_id = str(uuid.uuid4())
         request_id_context_var.set(request_id)
         return request_id
+    
+    def rate_limiter(request: Request):
+        client_ip = request.client.host
+        now = time()
+        
+        # Clean old requests
+        ip_request_count[client_ip] = [t for t in ip_request_count[client_ip] if now - t < RATE_WINDOW]
+        
+        # Add current request
+        ip_request_count[client_ip].append(now)
+        
+        # Check if rate limit exceeded
+        if len(ip_request_count[client_ip]) > RATE_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded"
+            )
 
-    @app.post("/v1/download", response_model=FileResponse)
+    @app.post("/v1/download", response_model=FileResponse, dependencies=[Depends(rate_limiter)])
     async def download(
         raw_request: Request,
         request: FileRequest,
+        background_tasks: BackgroundTasks,
         request_id: str = Depends(set_request_id),
     ):
         # no guard spawn required, download is by default global
 
-        # check sqlite3 DB
+        background_tasks.add_task(cleanup_expired_files)
+        
+        # Validate input parameters to prevent path traversal
+        if not request.file_hash or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.file_hash):
+            raise HTTPException(400, "Invalid file hash format")
+        
+        if Config.require_chat_id and (not request.chat_id or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.chat_id)):
+            raise HTTPException(400, "Invalid chat ID format")
+        
+        # Check download permissions
         try:
             check_and_decrement(file_hash=request.file_hash, chat_id=request.chat_id)
+        except FileNotFoundError:
+            logger.warning(f"File not found in database: {request.file_hash}")
+            raise HTTPException(404, f"File {request.file_hash} not found")
+        except PermissionError as e:
+            error_reason = str(e)
+            logger.warning(f"Permission error accessing file {request.file_hash}: {error_reason}")
+
+            # always 404, user could otherwise use this to check if a file exists
+            raise HTTPException(404, f"File {request.file_hash} not found")
         except Exception as e:
-            raise HTTPException(401, f"Unable to serve file!") from e
+            logger.error(f"Error checking file permissions: {str(e)}")
+            raise HTTPException(500, "Internal server error during file verification")
 
-        # if no exception thrown, attempt download
-        filepath = os.path.join(Config.file_storage_path, request.chat_id, request.file_hash)
+        # Build correct file path - use the same structure as the storage service
+        filepath = os.path.join(Config.file_storage_path, request.file_hash)
+        
+        # Check if file exists
         if not os.path.exists(filepath):
-             raise HTTPException(404, f"File {request.file_hash} not found for chat id {str(request.chat_id)}") from e
-
-        with open(filepath, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
-
-        return FileResponse(
-            filename="example.pdf",
-            content_type="application/pdf",
-            content_base64=encoded
-        )
+            logger.warning(f"File found in DBnot found on disk: {request.file_hash}")
+            raise HTTPException(404, f"File not found on disk")
+        
+        try:
+            # Read file content
+            with open(filepath, "rb") as f:
+                file_content = f.read()
+                encoded = base64.b64encode(file_content).decode("utf-8")
+            
+            # Detect the file type
+            content_type = "application/octet-stream"  # Default type
+            filename = request.filename
+            
+            # Try to guess MIME type
+            import mimetypes
+            guessed_type = mimetypes.guess_type(filename)[0]
+            if guessed_type:
+                content_type = guessed_type
+                
+            logger.info(f"Successfully served file {request.file_hash} to chat {request.chat_id}")
+            
+            return FileResponse(
+                filename=filename,
+                content_type=content_type,
+                content_base64=encoded
+            )
+        except Exception as e:
+            logger.error(f"Error reading file: {str(e)}")
+            raise HTTPException(500, f"Error reading file: {str(e)}")
 
 
     @app.post("/v1/execute", response_model=ExecuteResponse)
@@ -237,12 +303,20 @@ def create_http_server(
             )
 
             # Store files into sqlite DB
-            for _file_path, _file_hash in result.files.items():
-                register(
-                    file_hash=_file_hash,
-                    chat_id=payload.chat_id,
-                    max_downloads=Config.global_max_downloads,
-                )
+            try:
+                chat_id = getattr(payload, 'chat_id', None)
+                if Config.require_chat_id and not chat_id:
+                    logger.warning("Chat ID required but not provided in request")
+                    
+                for file_path, file_hash in result.files.items():
+                    register(
+                        file_hash=file_hash,
+                        chat_id=chat_id,
+                        max_downloads=Config.global_max_downloads,
+                    )
+            except Exception as e:
+                logger.error(f"Error registering files: {str(e)}")
+                # Continue execution, don't fail the request if file registration fails
         except Exception as e:
             logger.exception("Error executing code")
             raise HTTPException(status_code=500, detail=str(e))
