@@ -28,7 +28,7 @@ from code_interpreter.utils.validation import AbsolutePath, Hash
 from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks
 from json_repair import repair_json
 import fastjsonschema, pathlib, os, json
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_403_FORBIDDEN, HTTP_410_GONE
 import mimetypes, re
@@ -40,10 +40,11 @@ from code_interpreter.services.custom_tool_executor import (
 )
 from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExecutor
 
-from utils.file_meta import check_and_decrement, cleanup_expired_files, register
+from code_interpreter.utils.file_meta import check_and_decrement, cleanup_expired_files, register
 
 logger = logging.getLogger("code_interpreter_service")
 
+config = Config()
 SCHEMA_PATH = os.getenv("BEE_SCHEMA_PATH")
 _validate = fastjsonschema.compile(
     json.loads(pathlib.Path(SCHEMA_PATH).read_text())
@@ -121,16 +122,16 @@ class FileResponse(BaseModel):
     content_base64: str
 
 def _is_internal_request(req: Request) -> bool:
-    host_ok = req.headers.get("host", "") in Config.internal_host_allowlist
+    host_ok = req.headers.get("host", "") in config.internal_host_allowlist
     ip_ok = any(
         ip_address(req.client.host) in ip_network(cidr)
-        for cidr in Config.internal_host_allowlist
+        for cidr in config.internal_host_allowlist
     )
     return host_ok or ip_ok
 
 
 def _guard_spawn(req: Request):
-    if Config.public_spawn_enabled:
+    if config.public_spawn_enabled:
         return
     if not _is_internal_request(req):
         raise HTTPException(
@@ -157,7 +158,7 @@ def create_http_server(
     
     def rate_limiter(request: Request):
         client_ip = request.client.host
-        now = time()
+        now = time.time()
         
         # Clean old requests
         ip_request_count[client_ip] = [t for t in ip_request_count[client_ip] if now - t < RATE_WINDOW]
@@ -187,7 +188,7 @@ def create_http_server(
         if not request.file_hash or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.file_hash):
             raise HTTPException(400, "Invalid file hash format")
         
-        if Config.require_chat_id and (not request.chat_id or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.chat_id)):
+        if config.require_chat_id and (not request.chat_id or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.chat_id)):
             raise HTTPException(400, "Invalid chat ID format")
         
         # Check download permissions
@@ -207,35 +208,45 @@ def create_http_server(
             raise HTTPException(500, "Internal server error during file verification")
 
         # Build correct file path - use the same structure as the storage service
-        filepath = os.path.join(Config.file_storage_path, request.file_hash)
+        filepath = os.path.join(config.file_storage_path, request.file_hash)
         
         # Check if file exists
         if not os.path.exists(filepath):
-            logger.warning(f"File found in DBnot found on disk: {request.file_hash}")
+            logger.warning(f"File found in DB but not found on disk: {request.file_hash}")
             raise HTTPException(404, f"File not found on disk")
         
         try:
-            # Read file content
-            with open(filepath, "rb") as f:
-                file_content = f.read()
-                encoded = base64.b64encode(file_content).decode("utf-8")
-            
             # Detect the file type
             content_type = "application/octet-stream"  # Default type
             filename = request.filename
             
             # Try to guess MIME type
-            import mimetypes
             guessed_type = mimetypes.guess_type(filename)[0]
             if guessed_type:
                 content_type = guessed_type
-                
-            logger.info(f"Successfully served file {request.file_hash} to chat {request.chat_id}")
             
-            return FileResponse(
-                filename=filename,
-                content_type=content_type,
-                content_base64=encoded
+            # Get file size for content-length header
+            file_size = os.path.getsize(filepath)
+            
+            # Function to stream file in chunks
+            def file_streamer():
+                with open(filepath, "rb") as file:
+                    while chunk := file.read(8192):  # 8KB chunks
+                        yield chunk
+            
+            logger.info(f"Successfully serving file {request.file_hash} to chat {request.chat_id}")
+            
+            # Create response headers
+            headers = {
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Length": str(file_size),
+            }
+            
+            # Return a streaming response
+            return StreamingResponse(
+                file_streamer(),
+                media_type=content_type,
+                headers=headers
             )
         except Exception as e:
             logger.error(f"Error reading file: {str(e)}")
@@ -305,14 +316,14 @@ def create_http_server(
             # Store files into sqlite DB
             try:
                 chat_id = getattr(payload, 'chat_id', None)
-                if Config.require_chat_id and not chat_id:
+                if config.require_chat_id and not chat_id:
                     logger.warning("Chat ID required but not provided in request")
                     
                 for file_path, file_hash in result.files.items():
                     register(
                         file_hash=file_hash,
                         chat_id=chat_id,
-                        max_downloads=Config.global_max_downloads,
+                        max_downloads=config.global_max_downloads,
                     )
             except Exception as e:
                 logger.error(f"Error registering files: {str(e)}")

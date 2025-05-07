@@ -3,12 +3,14 @@ import logging
 from pathlib import Path
 import re
 from typing import Optional
-from config import Config
+from code_interpreter.config import Config
 
 import os
 import sqlite3
 
-_DB = Path(Config.file_storage_path) / "file_mgmt_db.sqlite3"
+config = Config()
+os.makedirs(config.file_storage_path, exist_ok=True)
+_DB = Path(config.file_storage_path) / "file_mgmt_db.sqlite3"
 _CONN = sqlite3.connect(_DB, check_same_thread=False, isolation_level=None)
 _CONN.execute("PRAGMA journal_mode=WAL;")
 _CONN.execute(
@@ -28,7 +30,7 @@ def register(file_hash: str, chat_id: Optional[str], max_downloads: int) -> None
         logger.warning(f"Invalid file hash format: {file_hash}")
         return
         
-    if Config.require_chat_id and not chat_id:
+    if config.require_chat_id and not chat_id:
         logger.warning("Attempted to register file without chat_id when required")
         return
     
@@ -57,14 +59,14 @@ def check_and_decrement(file_hash: str, chat_id: Optional[str]) -> None:
         raise FileNotFoundError
 
     db_chat, remaining = row
-    if Config.require_chat_id and db_chat != chat_id:
+    if config.require_chat_id and db_chat != chat_id:
         raise PermissionError("chat-id")
 
     if remaining is not None and remaining <= 0:
         raise PermissionError("expired")
 
     # decrement counter if limited
-    # TODO:  and Config.global_max_downloads != 0?
+    # TODO:  and config.global_max_downloads != 0?
     if remaining is not None:
         _CONN.execute(
             "UPDATE files SET remaining = remaining - 1 WHERE file_hash = ?;", (file_hash,)
@@ -86,7 +88,7 @@ def cleanup_expired_files():
             
             # Delete files from disk
             for (file_hash,) in expired:
-                file_path = os.path.join(Config.file_storage_path, file_hash)
+                file_path = os.path.join(config.file_storage_path, file_hash)
                 try:
                     if os.path.exists(file_path):
                         os.remove(file_path)

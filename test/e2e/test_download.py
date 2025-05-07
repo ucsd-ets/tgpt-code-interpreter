@@ -13,25 +13,12 @@ from code_interpreter.utils.file_meta import register, check_and_decrement
 @pytest.fixture
 def setup_test_files():
     # Create temporary test directory
-    temp_dir = tempfile.mkdtemp()
-    original_storage_path = Config.file_storage_path
+    config = Config()
+    stor = config.file_storage_path
     
     # Override config for testing
-    Config.file_storage_path = temp_dir
-    Config.require_chat_id = True
-    Config.global_max_downloads = 2
-    
-    # Create test database
-    db_path = os.path.join(temp_dir, "file_mgmt_db.sqlite3")
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            file_hash      TEXT PRIMARY KEY,
-            chat_id   TEXT,
-            remaining INTEGER
-        );
-    """)
-    conn.close()
+    config.require_chat_id = True
+    config.global_max_downloads = 2
     
     # Create test files
     test_files = {
@@ -41,7 +28,7 @@ def setup_test_files():
     }
     
     for file_hash, content in test_files.items():
-        file_path = os.path.join(temp_dir, file_hash)
+        file_path = os.path.join(stor, file_hash)
         with open(file_path, "wb") as f:
             f.write(content)
             
@@ -50,11 +37,7 @@ def setup_test_files():
     register("test_file2", "test_chat_1", 1)  # 1 download allowed
     register("test_file3", "test_chat_2", 0)  # unlimited downloads
     
-    yield temp_dir, test_files
-    
-    # Restore original config and clean up
-    Config.file_storage_path = original_storage_path
-    shutil.rmtree(temp_dir)
+    yield stor, test_files
 
 @pytest.fixture
 def http_client():
