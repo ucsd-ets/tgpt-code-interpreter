@@ -33,8 +33,11 @@ import string
 from code_interpreter.services.kubectl import Kubectl
 from code_interpreter.services.storage import Storage
 from code_interpreter.utils.validation import AbsolutePath, Hash
+from code_interpreter.config import Config
 
 logger = logging.getLogger("kubernetes_code_executor")
+
+config = Config()
 
 class KubernetesCodeExecutor:
     """
@@ -50,6 +53,7 @@ class KubernetesCodeExecutor:
         stderr: str
         exit_code: int
         files: Mapping[AbsolutePath, Hash]
+        chat_id: str = "default" 
 
     def __init__(
         self,
@@ -83,6 +87,7 @@ class KubernetesCodeExecutor:
         source_code: str,
         files: Mapping[AbsolutePath, Hash] = {},
         env: Mapping[str, str] = {},
+        chat_id: str | None = None,
     ) -> Result:
         """
         Executes the given Python source code in a Kubernetes pod.
@@ -92,15 +97,21 @@ class KubernetesCodeExecutor:
 
         Every time, a fresh pod is taken from a queue. It is discarded after use.
         """
+        # Ensure chat_id is provided
+        if chat_id is None:
+            chat_id = "default"
+            
         async with self.executor_pod() as executor_pod, httpx.AsyncClient(
             timeout=60.0
         ) as client:
             executor_pod_ip = executor_pod["status"]["podIP"]
 
+            # Upload files to executor
             async def upload_file(file_path, file_hash):
-                async with self.file_storage.reader(file_hash) as file_reader:
+                async with self.file_storage.reader(file_hash, chat_id, 
+                                                os.path.basename(file_path)) as file_reader:
                     return await client.put(
-                        f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix("/workspace/")}",
+                        f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix('/workspace/')}",
                         data=file_reader,
                     )
 
@@ -112,6 +123,7 @@ class KubernetesCodeExecutor:
                 )
             )
 
+            # Execute code
             logger.info("Requesting code execution")
             response = (
                 await client.post(
@@ -123,15 +135,27 @@ class KubernetesCodeExecutor:
                 )
             ).json()
 
-            async def download_file(file_path) -> str:
-                async with self.file_storage.writer() as stored_file, client.stream(
+            # Download changed files from executor and store with new structure
+            async def download_file(file_path) -> tuple[str, str]:
+                filename = os.path.basename(file_path)
+                async with self.file_storage.writer(filename, chat_id) as stored_file, client.stream(
                     "GET",
-                    f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix("/workspace/")}",
+                    f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix('/workspace/')}",
                 ) as pod_file:
                     pod_file.raise_for_status()
                     async for chunk in pod_file.aiter_bytes():
                         await stored_file.write(chunk)
-                return file_path, stored_file.hash
+                    
+                    # Register file in database for download tracking
+                    from code_interpreter.utils.file_meta import register
+                    register(
+                        file_hash=stored_file.hash,
+                        chat_id=chat_id,
+                        filename=filename,
+                        max_downloads=config.global_max_downloads,
+                    )
+                    
+                    return file_path, stored_file.hash
 
             logger.info("Collecting %s changed files", len(response["files"]))
             stored_files = {
@@ -146,6 +170,7 @@ class KubernetesCodeExecutor:
                 stderr=response["stderr"],
                 exit_code=response["exit_code"],
                 files=stored_files,
+                chat_id=chat_id,
             )
 
     async def fill_executor_pod_queue(self):

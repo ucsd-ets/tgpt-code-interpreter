@@ -40,3 +40,6 @@ spec:
     env:
     - name: APP_FILE_STORAGE_PATH
       value: /storage
+    # debug only
+    - name: APP_PUBLIC_SPAWN_ENABLED
+      value: "True"

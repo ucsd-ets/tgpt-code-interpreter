@@ -76,6 +76,7 @@ class ExecuteRequest(BaseModel):
     source_code: str
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
+    chat_id: str
 
 class ExecuteResponse(BaseModel):
     stdout: str
@@ -180,73 +181,70 @@ def create_http_server(
         background_tasks: BackgroundTasks,
         request_id: str = Depends(set_request_id),
     ):
-        # no guard spawn required, download is by default global
-
+        # Run cleanup in background
         background_tasks.add_task(cleanup_expired_files)
         
         # Validate input parameters to prevent path traversal
         if not request.file_hash or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.file_hash):
             raise HTTPException(400, "Invalid file hash format")
         
-        if config.require_chat_id and (not request.chat_id or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.chat_id)):
+        if not request.chat_id or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.chat_id):
             raise HTTPException(400, "Invalid chat ID format")
+        
+        if not request.filename or not re.match(r'^[0-9a-zA-Z._-]{1,255}$', request.filename):
+            raise HTTPException(400, "Invalid filename format")
         
         # Check download permissions
         try:
-            check_and_decrement(file_hash=request.file_hash, chat_id=request.chat_id)
+            check_and_decrement(
+                file_hash=request.file_hash, 
+                chat_id=request.chat_id,
+                filename=request.filename
+            )
         except FileNotFoundError:
-            logger.warning(f"File not found in database: {request.file_hash}")
-            raise HTTPException(404, f"File {request.file_hash} not found")
-        except PermissionError as e:
-            error_reason = str(e)
-            logger.warning(f"Permission error accessing file {request.file_hash}: {error_reason}")
-
-            # always 404, user could otherwise use this to check if a file exists
-            raise HTTPException(404, f"File {request.file_hash} not found")
+            logger.warning(f"File not found: {request.chat_id}/{request.file_hash}/{request.filename}")
+            raise HTTPException(404, f"File not found")
+        except PermissionError:
+            logger.warning(f"Download limit reached: {request.chat_id}/{request.file_hash}/{request.filename}")
+            raise HTTPException(404, f"File not found")  # Use 404 for security (no information disclosure)
         except Exception as e:
             logger.error(f"Error checking file permissions: {str(e)}")
             raise HTTPException(500, "Internal server error during file verification")
 
-        # Build correct file path - use the same structure as the storage service
-        filepath = os.path.join(config.file_storage_path, request.file_hash)
+        # Build correct file path with new structure
+        filepath = os.path.join(
+            config.file_storage_path, 
+            request.chat_id,
+            request.file_hash, 
+            request.filename
+        )
         
         # Check if file exists
         if not os.path.exists(filepath):
-            logger.warning(f"File found in DB but not found on disk: {request.file_hash}")
+            logger.warning(f"File found in DB but not on disk: {request.chat_id}/{request.file_hash}/{request.filename}")
             raise HTTPException(404, f"File not found on disk")
         
         try:
             # Detect the file type
-            content_type = "application/octet-stream"  # Default type
-            filename = request.filename
-            
-            # Try to guess MIME type
-            guessed_type = mimetypes.guess_type(filename)[0]
-            if guessed_type:
-                content_type = guessed_type
-            
-            # Get file size for content-length header
+            content_type = mimetypes.guess_type(request.filename)[0] or "application/octet-stream"
             file_size = os.path.getsize(filepath)
             
-            # Function to stream file in chunks
+            # Stream file in chunks
             def file_streamer():
                 with open(filepath, "rb") as file:
-                    while chunk := file.read(8192):  # 8KB chunks
+                    while chunk := file.read(8192):
                         yield chunk
             
-            logger.info(f"Successfully serving file {request.file_hash} to chat {request.chat_id}")
+            logger.info(f"Serving file {request.filename} ({request.file_hash}) to chat {request.chat_id}")
             
-            # Create response headers
-            headers = {
-                "Content-Disposition": f"attachment; filename={filename}",
-                "Content-Length": str(file_size),
-            }
-            
-            # Return a streaming response
+            # Return streaming response
             return StreamingResponse(
                 file_streamer(),
                 media_type=content_type,
-                headers=headers
+                headers={
+                    "Content-Disposition": f"attachment; filename={request.filename}",
+                    "Content-Length": str(file_size),
+                }
             )
         except Exception as e:
             logger.error(f"Error reading file: {str(e)}")
@@ -315,14 +313,15 @@ def create_http_server(
 
             # Store files into sqlite DB
             try:
-                chat_id = getattr(payload, 'chat_id', None)
-                if config.require_chat_id and not chat_id:
-                    logger.warning("Chat ID required but not provided in request")
+                if config.require_chat_id and not request.chat_id:
+                    raise HTTPException(403, "Chat ID required but not provided in request")
                     
                 for file_path, file_hash in result.files.items():
+                    filename = os.path.basename(file_path)
                     register(
                         file_hash=file_hash,
-                        chat_id=chat_id,
+                        chat_id=request.chat_id,
+                        filename=filename,
                         max_downloads=config.global_max_downloads,
                     )
             except Exception as e:

@@ -1,90 +1,89 @@
-# Copyright 2024 IBM Corp.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from contextlib import asynccontextmanager
 import secrets
-from typing import AsyncIterator, Protocol
+import os
+from typing import AsyncIterator, Protocol, Optional
 from anyio import Path
 from pydantic import validate_call
-
-from code_interpreter.utils.validation import Hash
-
 
 class ObjectReader(Protocol):
     async def read(self, size: int = -1) -> bytes: ...
 
-
 class ObjectWriter(Protocol):
     hash: str
+    filename: str
+    chat_id: str
 
     async def write(self, data: bytes) -> None: ...
 
-
 class Storage:
     """
-    Storage is a collection of objects. Objects consist of binary data and are identified by their SHA-256 hash.
-
-    This implementation is backed by the filesystem, where each object is stored as a file named by its hash.
+    Storage is a collection of objects organized by chat ID and hash.
+    Objects consist of binary data and are identified by their SHA-256 hash.
+    
+    Files are stored in: /storage/CHAT_ID/HASH/FILENAME
     """
 
     def __init__(self, storage_path: str):
         self.storage_path = Path(storage_path)
 
     @asynccontextmanager
-    async def writer(self) -> AsyncIterator[ObjectWriter]:
+    async def writer(self, filename: str, chat_id: str) -> AsyncIterator[ObjectWriter]:
         """
         Async context manager for writing a new object to the storage.
-
-        The final hash can be retrieved by using the `.hash` attribute
+        
+        Args:
+            filename: Original filename to preserve
+            chat_id: ID of the chat this file belongs to
         """
-        await self.storage_path.mkdir(parents=True, exist_ok=True)
         hash = secrets.token_hex(32)
-        async with await (self.storage_path / hash).open("wb") as file:
+        
+        # Create directory structure
+        chat_dir = self.storage_path / chat_id
+        hash_dir = chat_dir / hash
+        await chat_dir.mkdir(parents=True, exist_ok=True)
+        await hash_dir.mkdir(exist_ok=True)
+        
+        file_path = hash_dir / filename
+        async with await file_path.open("wb") as file:
             file.__setattr__("hash", hash)
+            file.__setattr__("filename", filename)
+            file.__setattr__("chat_id", chat_id)
             yield file
 
-    async def write(self, data: bytes) -> str:
+    async def write(self, data: bytes, filename: str, chat_id: str) -> str:
         """
         Writes the data to the storage and returns the hash of the object.
         """
-        async with self.writer() as f:
+        async with self.writer(filename=filename, chat_id=chat_id) as f:
             await f.write(data)
             return f.hash
 
     @asynccontextmanager
     @validate_call
-    async def reader(self, object_hash: Hash) -> AsyncIterator[ObjectReader]:
+    async def reader(self, object_hash: str, chat_id: str, filename: str) -> AsyncIterator[ObjectReader]:
         """
         Async context manager that opens an object for reading.
         """
-        target_file = self.storage_path / object_hash
+        target_dir = self.storage_path / chat_id / object_hash
+        target_file = target_dir / filename
+        
         if not object_hash or not await target_file.exists():
-            raise FileNotFoundError(f"File not found: {object_hash}")
+            raise FileNotFoundError(f"File not found: {chat_id}/{object_hash}/{filename}")
+            
         async with await target_file.open("rb") as f:
             yield f
 
     @validate_call
-    async def read(self, object_hash: Hash) -> bytes:
+    async def read(self, object_hash: str, chat_id: str, filename: str) -> bytes:
         """
         Reads the object with the given hash and returns it.
         """
-        async with self.reader(object_hash) as f:
+        async with self.reader(object_hash=object_hash, chat_id=chat_id, filename=filename) as f:
             return await f.read()
 
     @validate_call
-    async def exists(self, object_hash: Hash) -> bool:
+    async def exists(self, object_hash: str, chat_id: str, filename: str) -> bool:
         """
         Check if an object with the given hash exists in the storage.
         """
-        return await (self.storage_path / object_hash).exists()
+        return await (self.storage_path / chat_id / object_hash / filename).exists()

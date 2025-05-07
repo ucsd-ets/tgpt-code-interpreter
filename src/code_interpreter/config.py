@@ -76,7 +76,7 @@ class Config(BaseSettings):
     executor_pod_spec_extra: dict = {}
 
     # path to store files
-    file_storage_path: str = "/tmp/code_exec_files"
+    file_storage_path: str = "/tmp/code_interp"
 
     # how many executor pods to keep ready for immediate use
     executor_pod_queue_target_length: int = 5
