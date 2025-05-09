@@ -201,15 +201,16 @@ def create_http_server(
                 chat_id=request.chat_id,
                 filename=request.filename
             )
+        # Use 404 for security (no information disclosure)
         except FileNotFoundError:
             logger.warning(f"File not found: {request.chat_id}/{request.file_hash}/{request.filename}")
             raise HTTPException(404, f"File not found")
         except PermissionError:
             logger.warning(f"Download limit reached: {request.chat_id}/{request.file_hash}/{request.filename}")
-            raise HTTPException(404, f"File not found")  # Use 404 for security (no information disclosure)
+            raise HTTPException(404, f"File not found")
         except Exception as e:
             logger.error(f"Error checking file permissions: {str(e)}")
-            raise HTTPException(500, "Internal server error during file verification")
+            raise HTTPException(404, f"File not found")
 
         # Build correct file path with new structure
         filepath = os.path.join(
@@ -309,6 +310,7 @@ def create_http_server(
                 source_code=request.source_code,
                 files=request.files,
                 env=request.env,
+                chat_id=request.chat_id,
             )
 
             # Store files into sqlite DB

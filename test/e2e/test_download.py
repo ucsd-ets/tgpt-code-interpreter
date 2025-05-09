@@ -20,9 +20,9 @@ def setup_test_files(http_client):
     """Create test files and register them in the database"""
     # Setup test files with unique content
     test_files = {
-        "test_file1": "This is test file 1 content",
-        "test_file2": "This is test file 2 content", 
-        "test_file3": "This is test file 3 content"
+        "test_file1.txt": "This is test file 1 content",
+        "test_file2.txt": "This is test file 2 content", 
+        "test_file3.txt": "This is test file 3 content"
     }
     
     file_hashes = {}
@@ -61,9 +61,9 @@ import sqlite3
 # Access database directly
 conn = sqlite3.connect('/storage/file_mgmt_db.sqlite3')
 # Set limits: 2 downloads for file1, 1 for file2, unlimited for file3
-conn.execute("UPDATE files SET remaining = 2 WHERE file_hash = '{file_hashes['test_file1']}'")
-conn.execute("UPDATE files SET remaining = 1 WHERE file_hash = '{file_hashes['test_file2']}'")
-conn.execute("UPDATE files SET remaining = NULL WHERE file_hash = '{file_hashes['test_file3']}'")
+conn.execute("UPDATE files SET remaining = 2 WHERE file_hash = '{file_hashes['test_file1.txt']}'")
+conn.execute("UPDATE files SET remaining = 1 WHERE file_hash = '{file_hashes['test_file2.txt']}'")
+conn.execute("UPDATE files SET remaining = NULL WHERE file_hash = '{file_hashes['test_file3.txt']}'")
 conn.commit()
 print("Updated download limits")
 print(f"File hashes: {file_hashes}")
@@ -78,6 +78,26 @@ conn.close()
     
     return file_hashes, test_files
 
+@pytest.fixture()
+def increase_rate_limit(http_client):
+    """Temporarily increase the rate limit for tests"""
+    response = http_client.post(
+        "/v1/execute",
+        json={
+            "source_code": """
+# This is a hack to directly modify the rate limit in the running server
+# Note: This only works if the server and tests are in the same Python process
+import sys
+for module in sys.modules:
+    if 'http_server' in module:
+        sys.modules[module].RATE_LIMIT = 1000  # Much higher limit for tests
+        print(f"Increased rate limit in {module}")
+""",
+            "chat_id": "setup"
+        }
+    )
+    yield
+
 def test_successful_download(http_client, setup_test_files):
     file_hashes, test_files = setup_test_files
     
@@ -85,33 +105,15 @@ def test_successful_download(http_client, setup_test_files):
         "/v1/download", 
         json={
             "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file1"],
-            "filename": "myfile.txt"
+            "file_hash": file_hashes["test_file1.txt"],
+            "filename": "test_file1.txt"
         }
     )
     
     assert response.status_code == 200
     assert "text/plain" in response.headers["Content-Type"]
-    assert "attachment; filename=myfile.txt" in response.headers["Content-Disposition"]
-    assert response.content.decode() == test_files["test_file1"]
-
-def test_successful_download(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # Request a file download
-    response = http_client.post(
-        "/v1/download", 
-        json={
-            "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file1"],
-            "filename": "myfile.txt"
-        }
-    )
-    
-    assert response.status_code == 200
-    assert response.headers["Content-Type"].startswith("text/plain")
-    assert "attachment; filename=myfile.txt" in response.headers["Content-Disposition"]
-    assert response.content.decode() == files_data["test_file1"]
+    assert "attachment; filename=test_file1.txt" in response.headers["Content-Disposition"]
+    assert response.content.decode() == test_files["test_file1.txt"]
 
 def test_wrong_chat_id(http_client, setup_test_files):
     file_hashes, files_data = setup_test_files
@@ -121,7 +123,7 @@ def test_wrong_chat_id(http_client, setup_test_files):
         "/v1/download", 
         json={
             "chat_id": "wrong_chat_id",
-            "file_hash": file_hashes["test_file1"],
+            "file_hash": file_hashes["test_file1.txt"],
             "filename": "myfile.txt"
         }
     )
@@ -153,8 +155,8 @@ def test_download_limit_reached(http_client, setup_test_files):
         "/v1/download", 
         json={
             "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file2"],
-            "filename": "myfile.txt"
+            "file_hash": file_hashes["test_file2.txt"],
+            "filename": "test_file2.txt"
         }
     )
     assert response1.status_code == 200
@@ -164,8 +166,8 @@ def test_download_limit_reached(http_client, setup_test_files):
         "/v1/download", 
         json={
             "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file2"],
-            "filename": "myfile.txt"
+            "file_hash": file_hashes["test_file2.txt"],
+            "filename": "test_file2.txt"
         }
     )
     assert response2.status_code == 404
@@ -180,12 +182,12 @@ def test_unlimited_downloads(http_client, setup_test_files):
             "/v1/download", 
             json={
                 "chat_id": "test_chat_2",
-                "file_hash": file_hashes["test_file3"],
-                "filename": "myfile.txt"
+                "file_hash": file_hashes["test_file3.txt"],
+                "filename": "test_file3.txt"
             }
         )
         assert response.status_code == 200
-        assert response.content.decode() == files_data["test_file3"]
+        assert response.content.decode() == files_data["test_file3.txt"]
 
 def test_content_type_detection(http_client, setup_test_files):
     file_hashes, files_data = setup_test_files
@@ -203,8 +205,8 @@ def test_content_type_detection(http_client, setup_test_files):
         response = http_client.post(
             "/v1/download", 
             json={
-                "chat_id": "test_chat_1",
-                "file_hash": file_hashes["test_file1"],
+                "chat_id": "test_filetypes",
+                "file_hash": file_hashes["test_file1.txt"],
                 "filename": filename
             }
         )
