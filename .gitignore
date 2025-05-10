@@ -10,3 +10,4 @@ __pycache__
 
 # Local
 .tmp
+*.DS_Store

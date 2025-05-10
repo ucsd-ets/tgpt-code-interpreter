@@ -34,7 +34,7 @@ spec:
   containers:
   - name: code-interpreter-service
     image: ghcr.io/ucsd-ets/tgpt-code-interpreter:latest
-    imagePullPolicy: Always
+    imagePullPolicy: IfNotPresent
     ports:
     - containerPort: 50051
     - containerPort: 50081

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import validator
 
 
 class Config(BaseSettings):
@@ -74,10 +76,24 @@ class Config(BaseSettings):
     executor_pod_spec_extra: dict = {}
 
     # path to store files
-    file_storage_path: str = "./.tmp/files"
+    file_storage_path: str = "/tmp/code_interp"
 
     # how many executor pods to keep ready for immediate use
     executor_pod_queue_target_length: int = 5
 
     # first part of executor pod name, followed by number
     executor_pod_name_prefix: str = "code-executor-"
+
+    # Ingress Guard
+    public_spawn_enabled: bool = False
+
+    internal_host_allowlist: list[str] = []
+
+    internal_ip_allowlist: list[str] = [] # default internal UCSD IP range?
+
+    require_chat_id: bool = True
+
+    # file downloads, 0 = unlimited
+    global_max_downloads: int = 0
+
+

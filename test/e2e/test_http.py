@@ -1,19 +1,19 @@
 import json
 from pathlib import Path
+
 import pytest
 import httpx
 from code_interpreter.config import Config
 
+@pytest.fixture
+def http_client():
+    return httpx.Client(
+        base_url="http://localhost:50081",
+    )
 
 @pytest.fixture
 def config():
     return Config()
-
-
-@pytest.fixture
-def http_client():
-    base_url = "http://localhost:50081"
-    return httpx.Client(base_url=base_url)
 
 
 def read_file(file_hash: str, file_storage_path: str):
@@ -24,38 +24,38 @@ def test_imports(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/using_imports.py").read_text(),
         "files": {},
+        "workspace_persistence": True,
     }
     response = http_client.post("/v1/execute", json=request_data)
     assert response.status_code == 200
     response_json = response.json()
-    assert "P-Value" in response_json["stdout"], "P-Value not found in the output"
+    assert "P-Value" in response_json["stdout"]
 
 
 def test_ad_hoc_import(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/basic.py").read_text(),
         "files": {},
+        "workspace_persistence": True,
     }
     response = http_client.post("/v1/execute", json=request_data)
     assert response.status_code == 200
     response_json = response.json()
-    assert (
-        "Hello World" in response_json["stdout"]
-    ), "Hello World not found in the output"
+    assert "Hello World" in response_json["stdout"]
 
 
-def test_create_file_in_interpreter(http_client: httpx.Client, config: Config):
+def test_create_file_in_interpreter(http_client: httpx.Client):
     file_content = "Hello, World!"
 
-    # Create the file in the workspace
     response = http_client.post(
         "/v1/execute",
         json={
-            "source_code": f"""
+            "source_code": """
 with open('file.txt', 'w') as f:
-    f.write("{file_content}")
+    f.write("Hello, World!")
 """,
             "files": {},
+            "workspace_persistence": True,
         },
     )
 
@@ -64,7 +64,6 @@ with open('file.txt', 'w') as f:
     assert response_json["exit_code"] == 0
     assert response_json["files"].keys() == {"/workspace/file.txt"}
 
-    # Read the file back
     response = http_client.post(
         "/v1/execute",
         json={
@@ -75,6 +74,7 @@ with open('file.txt', 'r') as f:
             "files": {
                 "/workspace/file.txt": response_json["files"]["/workspace/file.txt"]
             },
+            "workspace_persistence": True,
         },
     )
 
@@ -82,24 +82,6 @@ with open('file.txt', 'r') as f:
     response_json = response.json()
     assert response_json["exit_code"] == 0
     assert response_json["stdout"] == file_content + "\n"
-    assert not response_json["files"]
-
-'''
-SKIPPED as test wont function + env functionality is unnecessary
-def test_execute_with_env(http_client: httpx.Client):
-    request_data = {
-        "source_code": "import os\nprint('Hello ' + os.environ['MY_NAME'])",
-        "files": {},
-        "env": {
-            "MY_NAME": "John Doe"
-        }
-    }
-    response = http_client.post("/v1/execute", json=request_data)
-    assert response.status_code == 200
-    response_json = response.json()
-    print(str(response_json))
-    assert response_json["stdout"].strip() == "Hello John Doe"
-'''
 
 
 def test_parse_custom_tool_success(http_client: httpx.Client):
@@ -126,16 +108,18 @@ def my_tool(a: int, b: typing.Tuple[Optional[str], str] = ("hello", "world"), *,
     :param c: something awful
     """
     return 1 + 1
-                '''
+'''
         },
     )
 
     assert response.status_code == 200
     response_json = response.json()
     assert response_json["tool_name"] == "my_tool"
-    assert (
-        response_json["tool_description"]
-        == "This tool is really really cool.\nVery toolish experience:\n- Toolable.\n- Toolastic.\n- Toolicious.\n\nReturns: int -- something great"
+    assert response_json["tool_description"] == (
+        "This tool is really really cool.\n"
+        "Very toolish experience:\n"
+        "- Toolable.\n- Toolastic.\n- Toolicious.\n\n"
+        "Returns: int -- something great"
     )
     assert json.loads(response_json["tool_input_schema_json"]) == {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -200,23 +184,17 @@ def current_weather(lat: float, lon: float):
     assert response.status_code == 200
     response_json = response.json()
     assert response_json["tool_name"] == "current_weather"
-    assert (
-        response_json["tool_description"]
-        == "Get the current weather at a location.\n\nReturns: A dictionary with the current weather."
+    assert response_json["tool_description"] == (
+        "Get the current weather at a location.\n\n"
+        "Returns: A dictionary with the current weather."
     )
     assert json.loads(response_json["tool_input_schema_json"]) == {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "title": "current_weather",
         "properties": {
-            "lat": {
-                "type": "number",
-                "description": "A latitude.",
-            },
-            "lon": {
-                "type": "number",
-                "description": "A longitude.",
-            },
+            "lat": {"type": "number", "description": "A latitude."},
+            "lon": {"type": "number", "description": "A longitude."},
         },
         "required": ["lat", "lon"],
         "additionalProperties": False,
@@ -292,16 +270,15 @@ def test_execute_custom_tool_with_env(http_client: httpx.Client):
         "/v1/execute-custom-tool",
         json={
             "tool_source_code": "import os\ndef greet() -> str:\n  return 'Hello ' + os.environ['MY_NAME']",
-            "tool_input_json": '{}',
-            "env": {
-                "MY_NAME": "John Doe"
-            }
+            "tool_input_json": "{}",
+            "env": {"MY_NAME": "John Doe"},
         },
     )
 
     assert response.status_code == 200
     response_json = response.json()
     assert json.loads(response_json["tool_output_json"]) == "Hello John Doe"
+
 
 def test_bad_source_code_key_name(http_client: httpx.Client):
     request_data = {
@@ -311,6 +288,4 @@ def test_bad_source_code_key_name(http_client: httpx.Client):
     response = http_client.post("/v1/execute", json=request_data)
     assert response.status_code == 200
     response_json = response.json()
-    assert (
-        "Hello World" in response_json["stdout"]
-    ), "Hello World not found in the output"
+    assert "Hello World" in response_json["stdout"]

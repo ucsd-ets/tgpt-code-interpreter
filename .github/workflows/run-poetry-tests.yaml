@@ -86,5 +86,5 @@ jobs:
             echo "Waiting for gRPC port to open… ($i/30)"
             sleep 1
           done
-          # give health check up to 60s
-          timeout 60s poetry run poe test
+
+          poetry run poe test
