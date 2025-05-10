@@ -86,6 +86,7 @@ def test_create_file_in_interpreter(
 with open('file.txt', 'w') as f:
     f.write("{file_content}")
 """,
+            persistent_workspace=True,
         )
     )
 

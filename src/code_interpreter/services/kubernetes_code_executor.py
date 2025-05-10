@@ -78,7 +78,7 @@ class KubernetesCodeExecutor:
         files: Mapping[AbsolutePath, Hash] = {},
         env: Mapping[str, str] = {},
         chat_id: str | None = None,
-        workspace_persistence: bool = False,
+        persistent_workspace: bool = False,
     ) -> Result:
         if chat_id is None:
             chat_id = "default"
@@ -108,7 +108,7 @@ class KubernetesCodeExecutor:
             ).json()
 
             stored_files: dict[str, str] = {}
-            if workspace_persistence and response["files"]:
+            if persistent_workspace and response["files"]:
                 async def download_file(file_path: str):
                     filename = os.path.basename(file_path)
                     async with self.file_storage.writer(
