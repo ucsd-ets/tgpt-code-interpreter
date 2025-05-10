@@ -25,7 +25,7 @@ from typing import List, Dict
 
 from code_interpreter.config import Config
 from code_interpreter.utils.validation import AbsolutePath, Hash
-from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, status, Request, BackgroundTasks, UploadFile, File, Form
 from json_repair import repair_json
 import fastjsonschema, pathlib, os, json
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -79,7 +79,7 @@ class ExecuteRequest(BaseModel):
     env: Dict[str, str] = {}
     chat_id: str = "default"
     limit: int | None = None
-    workspace_persistence: bool = False
+    persistent_workspace: bool = False
 
 class ExecuteResponse(BaseModel):
     stdout: str
@@ -124,6 +124,19 @@ class FileResponse(BaseModel):
     filename: str
     content_type: str
     content_base64: str
+
+class UploadResponse(BaseModel):
+    file_hash: str
+    filename: str
+    chat_id: str
+
+class ExpireRequest(BaseModel):
+    chat_id: str
+    file_hash: str
+    filename: str
+
+class ExpireResponse(BaseModel):
+    success: bool
 
 def _is_internal_request(req: Request) -> bool:
     host_ok = req.headers.get("host", "") in config.internal_host_allowlist
@@ -176,6 +189,70 @@ def create_http_server(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit exceeded"
             )
+
+    @app.post("/v1/upload", response_model=UploadResponse,
+              dependencies=[Depends(rate_limiter)])
+    async def upload_file(
+        raw_request: Request,
+        chat_id: str = Form(..., pattern=r"^[0-9a-zA-Z_-]{1,255}$"),
+        upload: UploadFile = File(...),
+        request_id: str = Depends(set_request_id),
+    ):
+        # Basic filename validation
+        if not re.match(r"^[0-9A-Za-z._-]{1,255}$", upload.filename):
+            raise HTTPException(400, "Invalid filename")
+
+        if upload.size and upload.size > 1_073_741_824:
+            raise HTTPException(413, "File too large")
+
+        try:
+            async with code_executor.file_storage.writer(
+                filename=upload.filename, chat_id=chat_id
+            ) as dest:
+                while chunk := await upload.read(8192):
+                    await dest.write(chunk)
+
+            logger.info("Uploaded %s (%s bytes) for chat %s",
+                        upload.filename, upload.size, chat_id)
+            return UploadResponse(
+                file_hash=dest.hash,
+                filename=upload.filename,
+                chat_id=chat_id,
+            )
+
+        except Exception as e:
+            logger.error("Upload failed: %s", e, exc_info=True)
+            raise HTTPException(500, f"Upload failed: {e}")
+
+    @app.post("/v1/expire", response_model=ExpireResponse,
+              dependencies=[Depends(rate_limiter)])
+    async def expire_file(
+        raw_request: Request,
+        request: ExpireRequest,
+        request_id: str = Depends(set_request_id),
+    ):
+        """
+        Immediately sets the remaining-downloads counter to 0 for a stored
+        object, rendering any future download calls invalid.
+        """
+        try:
+            from code_interpreter.utils.file_meta import expire
+            expire(
+                file_hash=request.file_hash,
+                chat_id=request.chat_id,
+                filename=request.filename,
+            )
+            logger.info("Expired %s/%s/%s",
+                        request.chat_id, request.file_hash, request.filename)
+            return ExpireResponse(success=True)
+
+        except FileNotFoundError:
+            # keep behaviour symmetric with download
+            raise HTTPException(404, "File not found")
+
+        except Exception as e:
+            logger.error("Expire failed: %s", e, exc_info=True)
+            raise HTTPException(500, f"Expire failed: {e}")
 
     @app.post("/v1/download", response_model=FileResponse, dependencies=[Depends(rate_limiter)])
     async def download(
@@ -314,11 +391,11 @@ def create_http_server(
                 files=request.files,
                 env=request.env,
                 chat_id=request.chat_id,
-                workspace_persistence=request.workspace_persistence
+                persistent_workspace=request.persistent_workspace
             )
 
             # Store files into sqlite DB
-            if request.workspace_persistence:
+            if request.persistent_workspace:
                 try:
                     if config.require_chat_id and not request.chat_id:
                         raise HTTPException(403, "Chat ID required but not provided in request")

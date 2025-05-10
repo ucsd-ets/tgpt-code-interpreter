@@ -1,13 +1,13 @@
 [tool.poetry]
 name = "tgpt-code-interpreter"
-version = "0.0.29"
+version = "0.1"
 license = "Apache-2.0"
 description = "A gRPC service intended as a backend for an LLM that can run arbitrary pieces of Python code."
 authors = [ "Jan Pokorný <jan.pokorny@ibm.com>", "Tomáš Dvořák <tomas.dvorak@ibm.com>" ]
 packages = [ { include = "code_interpreter", from = "src" }, { include = "proto", from = "submodules/bee-proto/gen/python" }, { include = "buf", from = "submodules/bee-proto/gen/python" } ]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.13"
 
 aiorun = "^2024.8.1"
 anyio = "^4.6.2.post1"
@@ -23,6 +23,7 @@ fastapi = "^0.115.2"
 uvicorn = "^0.31.1"
 json-repair = "^0.42.0"
 fastjsonschema = "^2.21.1"
+python-multipart = "^0.0.20"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"

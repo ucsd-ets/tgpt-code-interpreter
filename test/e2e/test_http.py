@@ -1,10 +1,13 @@
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 import httpx
 from code_interpreter.config import Config
+from code_interpreter.utils.file_meta import cleanup_expired_files
 
+# Helpers
 @pytest.fixture
 def http_client():
     return httpx.Client(
@@ -15,16 +18,15 @@ def http_client():
 def config():
     return Config()
 
-
 def read_file(file_hash: str, file_storage_path: str):
     return (Path(file_storage_path) / file_hash).read_bytes()
 
-
+# Tests
 def test_imports(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/using_imports.py").read_text(),
         "files": {},
-        "workspace_persistence": True,
+        "persistent_workspace": True,
     }
     response = http_client.post("/v1/execute", json=request_data)
     assert response.status_code == 200
@@ -36,7 +38,7 @@ def test_ad_hoc_import(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/basic.py").read_text(),
         "files": {},
-        "workspace_persistence": True,
+        "persistent_workspace": True,
     }
     response = http_client.post("/v1/execute", json=request_data)
     assert response.status_code == 200
@@ -55,7 +57,7 @@ with open('file.txt', 'w') as f:
     f.write("Hello, World!")
 """,
             "files": {},
-            "workspace_persistence": True,
+            "persistent_workspace": True,
         },
     )
 
@@ -74,7 +76,7 @@ with open('file.txt', 'r') as f:
             "files": {
                 "/workspace/file.txt": response_json["files"]["/workspace/file.txt"]
             },
-            "workspace_persistence": True,
+            "persistent_workspace": True,
         },
     )
 
@@ -289,3 +291,4 @@ def test_bad_source_code_key_name(http_client: httpx.Client):
     assert response.status_code == 200
     response_json = response.json()
     assert "Hello World" in response_json["stdout"]
+

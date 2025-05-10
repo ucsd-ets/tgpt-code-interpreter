@@ -74,6 +74,15 @@ def check_and_decrement(file_hash: str, chat_id: str, filename: str) -> None:
                 (file_hash, chat_id, filename)
             )
 
+def expire(file_hash: str, chat_id: str, filename: str) -> None:
+    cur = _CONN.execute(
+        "UPDATE files SET remaining = 0 "
+        "WHERE file_hash = ? AND chat_id = ? AND filename = ?;",
+        (file_hash, chat_id, filename),
+    )
+    if cur.rowcount == 0:
+        raise FileNotFoundError("No such file registered")
+
 def cleanup_expired_files():
     """Remove records with remaining=0 and clean up orphaned files"""
     try:
