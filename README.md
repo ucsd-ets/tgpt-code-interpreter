@@ -1,13 +1,7 @@
-<h1 align="left">BeeAI Code Interpreter</h1>
+<h1 align="left">TritonGPT (based on BeeAI) Code Interpreter</h1>
 
 <p align="left">
-  <a aria-label="Join the community on GitHub" href="https://github.com/i-am-bee/bee-code-interpreter/discussions">
-    <img alt="" src="https://img.shields.io/badge/Join%20the%20community-blueviolet.svg?style=for-the-badge&labelColor=000000&label=BeeAI">
-  </a>
-</p>
-
-<p align="left">
-BeeAI Code Interpreter is a powerful HTTP service built to enable LLMs to execute arbitrary Python code. Engineered with safety and reproducibility at the core, this service is designed to seamlessly integrate with your applications.
+TritonGPT (based on BeeAI) Code Interpreter is a powerful HTTP service built to enable LLMs to execute arbitrary Python code. Engineered with safety and reproducibility at the core, this service is designed to seamlessly integrate with your applications.
 </p>
 
 > [!NOTE]
