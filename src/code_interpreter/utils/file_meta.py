@@ -87,6 +87,8 @@ def cleanup_expired_files():
             _CONN.execute("DELETE FROM files WHERE remaining = 0")
             
             # Delete files from disk
+            # TODO: Uncomment + verify safety
+            '''
             for file_hash, chat_id, filename in expired:
                 file_path = os.path.join(config.file_storage_path, chat_id, file_hash, filename)
                 try:
@@ -102,5 +104,6 @@ def cleanup_expired_files():
                         logger.info(f"Deleted expired file: {chat_id}/{file_hash}/{filename}")
                 except Exception as e:
                     logger.error(f"Error deleting expired file {file_path}: {str(e)}")
+            '''
     except Exception as e:
         logger.error(f"Error in cleanup task: {str(e)}")

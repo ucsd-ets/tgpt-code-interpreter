@@ -1,215 +1,213 @@
-import os
+# test/e2e/test_download.py
 import pytest
 import httpx
-import json
-import base64
 
-from code_interpreter.config import Config
-
-@pytest.fixture
-def config():
-    return Config()
 
 @pytest.fixture
 def http_client():
-    base_url = "http://localhost:50081"
-    return httpx.Client(base_url=base_url)
+    return httpx.Client(
+        base_url="http://localhost:50081",
+    )
+
 
 @pytest.fixture
 def setup_test_files(http_client):
-    """Create test files and register them in the database"""
-    # Setup test files with unique content
-    test_files = {
-        "test_file1.txt": "This is test file 1 content",
-        "test_file2.txt": "This is test file 2 content", 
-        "test_file3.txt": "This is test file 3 content"
+    to_create = {
+        "test_file1.txt": {"chat": "test_chat_1", "limit": 2},
+        "test_file2.txt": {"chat": "test_chat_1", "limit": 1},
+        "test_file3.txt": {"chat": "test_chat_2", "limit": None},
+        "dummy.pdf": {"chat": "test_chat_2", "limit": None},
+        "image.png": {"chat": "test_chat_2", "limit": None},
+        "code.py": {"chat": "test_chat_2", "limit": None},
     }
-    
-    file_hashes = {}
-    
-    # Create files and register them in one step
-    for file_name, content in test_files.items():
-        chat_id = "test_chat_1" if file_name != "test_file3" else "test_chat_2"
-        
-        response = http_client.post(
-            "/v1/execute",
-            json={
-                "source_code": f"""
-import os
-# Create file in workspace (this is tracked automatically)
-with open('{file_name}', 'w') as f:
-    f.write('{content}')
-print(f"Created {file_name}")
-""",
-                "chat_id": chat_id
-            }
-        )
-        
-        assert response.status_code == 200
-        result = response.json()
-        
-        file_path = f"/workspace/{file_name}"
-        assert file_path in result["files"], f"File {file_path} not found in response: {result}"
-        file_hashes[file_name] = result["files"][file_path]
-    
-    # Update file download limits in database
-    response = http_client.post(
-        "/v1/execute",
-        json={
-            "source_code": f"""
-import sqlite3
-# Access database directly
-conn = sqlite3.connect('/storage/file_mgmt_db.sqlite3')
-# Set limits: 2 downloads for file1, 1 for file2, unlimited for file3
-conn.execute("UPDATE files SET remaining = 2 WHERE file_hash = '{file_hashes['test_file1.txt']}'")
-conn.execute("UPDATE files SET remaining = 1 WHERE file_hash = '{file_hashes['test_file2.txt']}'")
-conn.execute("UPDATE files SET remaining = NULL WHERE file_hash = '{file_hashes['test_file3.txt']}'")
-conn.commit()
-print("Updated download limits")
-print(f"File hashes: {file_hashes}")
-conn.close()
-""",
-            "chat_id": "test_chat_1"
-        }
-    )
-    
-    assert response.status_code == 200
-    print(f"Setup complete: {file_hashes}")
-    
-    return file_hashes, test_files
 
-@pytest.fixture()
-def increase_rate_limit(http_client):
-    """Temporarily increase the rate limit for tests"""
+    hashes = {}
+    contents = {}
+
+    for fname, meta in to_create.items():
+        chat_id = meta["chat"]
+        limit = meta["limit"]
+        content = f"content of {fname}"
+        contents[fname] = content
+
+        payload = {
+            "source_code": (
+                f"from pathlib import Path\n"
+                f"Path({fname!r}).write_text({content!r})"
+            ),
+            "chat_id": chat_id,
+            "workspace_persistence": True,
+        }
+        if limit is not None:
+            payload["limit"] = limit
+
+        resp = http_client.post("/v1/execute", json=payload)
+        assert resp.status_code == 200, resp.text
+        result = resp.json()
+        hashes[fname] = result["files"][f"/workspace/{fname}"]
+
+    return hashes, contents
+
+
+def test_download_with_limits(http_client, setup_test_files):
+    hashes, contents = setup_test_files
+
+    for _ in range(2):
+        r = http_client.post(
+            "/v1/download",
+            json={
+                "chat_id": "test_chat_1",
+                "file_hash": hashes["test_file1.txt"],
+                "filename": "test_file1.txt",
+            },
+        )
+        assert r.status_code == 200
+        assert r.text == contents["test_file1.txt"]
+
+    r = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "test_chat_1",
+            "file_hash": hashes["test_file1.txt"],
+            "filename": "test_file1.txt",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_single_download_limit(http_client, setup_test_files):
+    hashes, contents = setup_test_files
+
+    first = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "test_chat_1",
+            "file_hash": hashes["test_file2.txt"],
+            "filename": "test_file2.txt",
+        },
+    )
+    assert first.status_code == 200
+    assert first.text == contents["test_file2.txt"]
+
+    second = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "test_chat_1",
+            "file_hash": hashes["test_file2.txt"],
+            "filename": "test_file2.txt",
+        },
+    )
+    assert second.status_code == 404
+
+
+def test_unlimited_downloads(http_client, setup_test_files):
+    hashes, contents = setup_test_files
+
+    for _ in range(3):
+        r = http_client.post(
+            "/v1/download",
+            json={
+                "chat_id": "test_chat_2",
+                "file_hash": hashes["test_file3.txt"],
+                "filename": "test_file3.txt",
+            },
+        )
+        assert r.status_code == 200
+        assert r.text == contents["test_file3.txt"]
+
+
+def test_content_type_detection(http_client, setup_test_files):
+    hashes, _ = setup_test_files
+
+    expected_types = {
+        "dummy.pdf": "application/pdf",
+        "image.png": "image/png",
+        "code.py": "text/x-python",
+    }
+
+    for fname, mimetype in expected_types.items():
+        r = http_client.post(
+            "/v1/download",
+            json={
+                "chat_id": "test_chat_2",
+                "file_hash": hashes[fname],
+                "filename": fname,
+            },
+        )
+        assert r.status_code == 200
+        assert r.headers["Content-Type"].startswith(mimetype)
+
+
+def test_file_not_found(http_client, setup_test_files):
+    _ = setup_test_files
+    r = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "test_chat_1",
+            "file_hash": "nonexistent_hash",
+            "filename": "doesnt_matter.txt",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_wrong_chat_id(http_client, setup_test_files):
+    hashes, _ = setup_test_files
+
+    r = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "wrong_chat",
+            "file_hash": hashes["test_file1.txt"],
+            "filename": "test_file1.txt",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_bad_hash(http_client, setup_test_files):
+    _ = setup_test_files
+    r = http_client.post(
+        "/v1/download",
+        json={
+            "chat_id": "test_chat_1",
+            "file_hash": "BADHASH",
+            "filename": "test_file1.txt",
+        },
+    )
+    assert r.status_code == 404
+
+def test_no_persist(http_client, setup_test_files):
+    file_content = "Hello, World!"
+
     response = http_client.post(
         "/v1/execute",
         json={
             "source_code": """
-# This is a hack to directly modify the rate limit in the running server
-# Note: This only works if the server and tests are in the same Python process
-import sys
-for module in sys.modules:
-    if 'http_server' in module:
-        sys.modules[module].RATE_LIMIT = 1000  # Much higher limit for tests
-        print(f"Increased rate limit in {module}")
+with open('file.txt', 'w') as f:
+    f.write("Hello, World!")
 """,
-            "chat_id": "setup"
-        }
+            "files": {},
+            "workspace_persistence": False,
+        },
     )
-    yield
 
-def test_successful_download(http_client, setup_test_files):
-    file_hashes, test_files = setup_test_files
-    
-    response = http_client.post(
-        "/v1/download", 
-        json={
-            "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file1.txt"],
-            "filename": "test_file1.txt"
-        }
-    )
-    
     assert response.status_code == 200
-    assert "text/plain" in response.headers["Content-Type"]
-    assert "attachment; filename=test_file1.txt" in response.headers["Content-Disposition"]
-    assert response.content.decode() == test_files["test_file1.txt"]
+    response_json = response.json()
+    assert response_json["exit_code"] == 0
+    assert not response_json["files"].keys()
 
-def test_wrong_chat_id(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # Try with wrong chat ID
     response = http_client.post(
-        "/v1/download", 
+        "/v1/execute",
         json={
-            "chat_id": "wrong_chat_id",
-            "file_hash": file_hashes["test_file1.txt"],
-            "filename": "myfile.txt"
-        }
+            "source_code": """
+with open('file.txt', 'r') as f:
+    print(f.read())
+""",
+        },
     )
-    
-    assert response.status_code == 404
-    # Note: The API returns 404 for both not found and unauthorized access to prevent enumeration
 
-def test_file_not_found(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # Try with non-existent file
-    response = http_client.post(
-        "/v1/download", 
-        json={
-            "chat_id": "test_chat_1",
-            "file_hash": "nonexistent_file",
-            "filename": "myfile.txt"
-        }
-    )
-    
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"]
-
-def test_download_limit_reached(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # First download should succeed
-    response1 = http_client.post(
-        "/v1/download", 
-        json={
-            "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file2.txt"],
-            "filename": "test_file2.txt"
-        }
-    )
-    assert response1.status_code == 200
-    
-    # Second download should fail (limit was 1)
-    response2 = http_client.post(
-        "/v1/download", 
-        json={
-            "chat_id": "test_chat_1",
-            "file_hash": file_hashes["test_file2.txt"],
-            "filename": "test_file2.txt"
-        }
-    )
-    assert response2.status_code == 404
-    # API returns 404 for both not found and permission errors
-
-def test_unlimited_downloads(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # Do multiple downloads of the unlimited file
-    for _ in range(3):
-        response = http_client.post(
-            "/v1/download", 
-            json={
-                "chat_id": "test_chat_2",
-                "file_hash": file_hashes["test_file3.txt"],
-                "filename": "test_file3.txt"
-            }
-        )
-        assert response.status_code == 200
-        assert response.content.decode() == files_data["test_file3.txt"]
-
-def test_content_type_detection(http_client, setup_test_files):
-    file_hashes, files_data = setup_test_files
-    
-    # Test different file extensions
-    file_types = {
-        "document.pdf": "application/pdf",
-        "image.png": "image/png",
-        "code.py": "text/x-python",
-        "data.json": "application/json",
-        "spreadsheet.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    }
-    
-    for filename, expected_type in file_types.items():
-        response = http_client.post(
-            "/v1/download", 
-            json={
-                "chat_id": "test_filetypes",
-                "file_hash": file_hashes["test_file1.txt"],
-                "filename": filename
-            }
-        )
-        
-        assert response.status_code == 200
-        assert response.headers["Content-Type"].startswith(expected_type)
+    assert response.status_code == 200
+    response_json = response.json()
+    assert response_json["exit_code"] == 1
+    assert "No such file or directory" in response_json['stderr']

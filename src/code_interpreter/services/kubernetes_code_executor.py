@@ -16,44 +16,34 @@ import asyncio
 import collections
 import logging
 import os
-import httpx
+import random
+import string
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncGenerator, Mapping
-from pydantic import validate_call
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
-import random
-import string
 
+import httpx
+from pydantic import validate_call
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from code_interpreter.config import Config
 from code_interpreter.services.kubectl import Kubectl
 from code_interpreter.services.storage import Storage
 from code_interpreter.utils.validation import AbsolutePath, Hash
-from code_interpreter.config import Config
 
 logger = logging.getLogger("kubernetes_code_executor")
 
 config = Config()
 
-class KubernetesCodeExecutor:
-    """
-    Heart of the code interpreter service, this class is responsible for:
-    - Provisioning and managing executor pods
-    - Executing Python code in the pods
-    - Cleaning up old executor pods
-    """
 
+class KubernetesCodeExecutor:
     @dataclass
     class Result:
         stdout: str
         stderr: str
         exit_code: int
         files: Mapping[AbsolutePath, Hash]
-        chat_id: str = "default" 
+        chat_id: str = "default"
 
     def __init__(
         self,
@@ -88,82 +78,67 @@ class KubernetesCodeExecutor:
         files: Mapping[AbsolutePath, Hash] = {},
         env: Mapping[str, str] = {},
         chat_id: str | None = None,
+        workspace_persistence: bool = False,
     ) -> Result:
-        """
-        Executes the given Python source code in a Kubernetes pod.
-
-        Optionally, a file mapping can be provided to restore the pod filesystem to a specific state.
-        If none is provided, starts from a blank slate.
-
-        Every time, a fresh pod is taken from a queue. It is discarded after use.
-        """
-        # Ensure chat_id is provided
         if chat_id is None:
             chat_id = "default"
-            
+
         async with self.executor_pod() as executor_pod, httpx.AsyncClient(
             timeout=60.0
         ) as client:
             executor_pod_ip = executor_pod["status"]["podIP"]
 
-            # Upload files to executor
-            async def upload_file(file_path, file_hash):
-                async with self.file_storage.reader(file_hash, chat_id, 
-                                                os.path.basename(file_path)) as file_reader:
+            async def upload_file(path_: str, file_hash: str):
+                async with self.file_storage.reader(
+                    file_hash, chat_id, os.path.basename(path_)
+                ) as fh:
                     return await client.put(
-                        f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix('/workspace/')}",
-                        data=file_reader,
+                        f"http://{executor_pod_ip}:8000/workspace/{path_.removeprefix('/workspace/')}",
+                        data=fh,
                     )
-
             logger.info("Uploading %s files to executor pod", len(files))
-            await asyncio.gather(
-                *(
-                    upload_file(file_path, file_hash)
-                    for file_path, file_hash in files.items()
-                )
-            )
+            await asyncio.gather(*(upload_file(p, h) for p, h in files.items()))
 
-            # Execute code
             logger.info("Requesting code execution")
             response = (
                 await client.post(
                     f"http://{executor_pod_ip}:8000/execute",
-                    json={
-                        "source_code": source_code,
-                        "env": env,
-                    },
+                    json={"source_code": source_code, "env": env},
                 )
             ).json()
 
-            # Download changed files from executor and store with new structure
-            async def download_file(file_path) -> tuple[str, str]:
-                filename = os.path.basename(file_path)
-                async with self.file_storage.writer(filename, chat_id) as stored_file, client.stream(
-                    "GET",
-                    f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix('/workspace/')}",
-                ) as pod_file:
-                    pod_file.raise_for_status()
-                    async for chunk in pod_file.aiter_bytes():
-                        await stored_file.write(chunk)
-                    
-                    # Register file in database for download tracking
-                    from code_interpreter.utils.file_meta import register
-                    register(
-                        file_hash=stored_file.hash,
-                        chat_id=chat_id,
-                        filename=filename,
-                        max_downloads=config.global_max_downloads,
-                    )
-                    
-                    return file_path, stored_file.hash
+            stored_files: dict[str, str] = {}
+            if workspace_persistence and response["files"]:
+                async def download_file(file_path: str):
+                    filename = os.path.basename(file_path)
+                    async with self.file_storage.writer(
+                        filename, chat_id
+                    ) as stored_file, client.stream(
+                        "GET",
+                        f"http://{executor_pod_ip}:8000/workspace/{file_path.removeprefix('/workspace/')}",
+                    ) as pod_file:
+                        pod_file.raise_for_status()
+                        async for chunk in pod_file.aiter_bytes():
+                            await stored_file.write(chunk)
 
-            logger.info("Collecting %s changed files", len(response["files"]))
-            stored_files = {
-                stored_file_path: stored_file_hash
-                for stored_file_path, stored_file_hash in await asyncio.gather(
-                    *(download_file(file_path) for file_path in response["files"])
-                )
-            }
+                        from code_interpreter.utils.file_meta import register
+
+                        register(
+                            file_hash=stored_file.hash,
+                            chat_id=chat_id,
+                            filename=filename,
+                            max_downloads=config.global_max_downloads,
+                        )
+
+                        return file_path, stored_file.hash
+
+                logger.info("Collecting %s changed files", len(response["files"]))
+                stored_files = {
+                    p: h
+                    for p, h in await asyncio.gather(
+                        *(download_file(p) for p in response["files"])
+                    )
+                }
 
             return KubernetesCodeExecutor.Result(
                 stdout=response["stdout"],
@@ -174,9 +149,6 @@ class KubernetesCodeExecutor:
             )
 
     async def fill_executor_pod_queue(self):
-        """
-        Ensure that we have enough ready executor pods.
-        """
         count_to_spawn = (
             self.executor_pod_queue_target_length
             - len(self.executor_pod_queue)
@@ -194,12 +166,12 @@ class KubernetesCodeExecutor:
         self.executor_pod_queue_spawning_count += count_to_spawn
 
         spawned_pods = 0
-        for pod_spawn_task in asyncio.as_completed(
+        for pod_task in asyncio.as_completed(
             asyncio.create_task(self.spawn_executor_pod())
             for _ in range(count_to_spawn)
         ):
             try:
-                self.executor_pod_queue.append(await pod_spawn_task)
+                self.executor_pod_queue.append(await pod_task)
                 spawned_pods += 1
             except Exception:
                 logger.exception("Failed to spawn executor pod")
@@ -219,17 +191,14 @@ class KubernetesCodeExecutor:
         wait=wait_exponential(multiplier=1, min=4, max=10),
     )
     async def spawn_executor_pod(self):
-        """
-        Create a new executor pod and return its JSON
-        """
         if self.self_pod is None:
             self.self_pod = await self.kubectl.get("pod", os.environ["HOSTNAME"])
 
-        try:
-            name = self.executor_pod_name_prefix + "".join(
-                random.choice(string.ascii_lowercase + string.digits) for _ in range(6)
-            )
+        name = self.executor_pod_name_prefix + "".join(
+            random.choice(string.ascii_lowercase + string.digits) for _ in range(6)
+        )
 
+        try:
             await self.kubectl.create(
                 filename="-",
                 input={
@@ -272,9 +241,6 @@ class KubernetesCodeExecutor:
 
     @asynccontextmanager
     async def executor_pod(self) -> AsyncGenerator[dict, None]:
-        """
-        Context manager that grabs a ready executor pod from the queue and deletes it when done.
-        """
         pod = (
             self.executor_pod_queue.popleft()
             if self.executor_pod_queue

@@ -54,6 +54,7 @@ ALIASES = {
     "sourceCode": "source_code",
     "code":       "source_code",
     "timeoutSeconds": "timeout",
+    "limitDownloads": "limit",
 }
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 
@@ -76,7 +77,9 @@ class ExecuteRequest(BaseModel):
     source_code: str
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
-    chat_id: str
+    chat_id: str = "default"
+    limit: int | None = None
+    workspace_persistence: bool = False
 
 class ExecuteResponse(BaseModel):
     stdout: str
@@ -148,7 +151,7 @@ def create_http_server(
     # vars
     app = FastAPI()
     
-    RATE_LIMIT = 10  # max requests per minute
+    RATE_LIMIT = 100  # max requests per minute
     RATE_WINDOW = 60  # window in seconds
     ip_request_count = defaultdict(list)
 
@@ -311,24 +314,25 @@ def create_http_server(
                 files=request.files,
                 env=request.env,
                 chat_id=request.chat_id,
+                workspace_persistence=request.workspace_persistence
             )
 
             # Store files into sqlite DB
-            try:
-                if config.require_chat_id and not request.chat_id:
-                    raise HTTPException(403, "Chat ID required but not provided in request")
-                    
-                for file_path, file_hash in result.files.items():
-                    filename = os.path.basename(file_path)
-                    register(
-                        file_hash=file_hash,
-                        chat_id=request.chat_id,
-                        filename=filename,
-                        max_downloads=config.global_max_downloads,
-                    )
-            except Exception as e:
-                logger.error(f"Error registering files: {str(e)}")
-                # Continue execution, don't fail the request if file registration fails
+            if request.workspace_persistence:
+                try:
+                    if config.require_chat_id and not request.chat_id:
+                        raise HTTPException(403, "Chat ID required but not provided in request")
+                        
+                    for file_path, file_hash in result.files.items():
+                        filename = os.path.basename(file_path)
+                        register(
+                            file_hash=file_hash,
+                            chat_id=request.chat_id,
+                            filename=filename,
+                            max_downloads=(request.limit if request.limit is not None else config.global_max_downloads),
+                        )
+                except Exception as e:
+                    logger.error(f"Error registering files: {str(e)}")
         except Exception as e:
             logger.exception("Error executing code")
             raise HTTPException(status_code=500, detail=str(e))
@@ -394,4 +398,3 @@ def create_http_server(
         )
 
     return app
-
