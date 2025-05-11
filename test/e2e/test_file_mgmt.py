@@ -208,6 +208,8 @@ def test_upload_then_execute(http_client):
     assert ex.status_code == 200 and ex.json()["stdout"].strip() == "1"
 
 
+# TODO: Proper test: /upload followed by /download directly instead of using execute at all.
+
 # ---------- /v1/expire -----------------------------------------------------
 
 
