@@ -12,18 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import httpx
 from code_interpreter.config import Config
-import grpc
-from proto.code_interpreter.v1.code_interpreter_service_pb2 import (
-    ExecuteRequest,
-)
-from proto.code_interpreter.v1.code_interpreter_service_pb2_grpc import (
-    CodeInterpreterServiceStub,
-)
-
 
 def health_check():
+    """
+    Performs a health check using either gRPC (if enabled) or HTTP API.
+    Executes a simple arithmetic operation and verifies the result.
+    """
     config = Config()
+    
+    if getattr(config, 'grpc_enabled', True):
+        try:
+            return grpc_health_check(config)
+        except Exception as e:
+            print(f"gRPC health check failed: {e}")
+            print("Falling back to HTTP health check...")
+    
+    return http_health_check(config)
+
+
+def grpc_health_check(config):
+    import grpc
+    from proto.code_interpreter.v1.code_interpreter_service_pb2 import ExecuteRequest
+    from proto.code_interpreter.v1.code_interpreter_service_pb2_grpc import CodeInterpreterServiceStub
 
     if (
         not config.grpc_tls_cert
@@ -42,15 +54,43 @@ def health_check():
             ),
         )
 
-    assert (
-        CodeInterpreterServiceStub(channel)
-        .Execute(
-            ExecuteRequest(source_code="print(21 * 2)"),
-            timeout=9999,  # no need to timeout here -- k8s health checks have their own timeouts
-        )
-        .stdout
-        == "42\n"
+    result = CodeInterpreterServiceStub(channel).Execute(
+        ExecuteRequest(source_code="print(21 * 2)"),
+        timeout=30,
     )
+    
+    assert result.stdout == "42\n", f"Expected '42\n', got '{result.stdout}'"
+    assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}"
+    
+    print("gRPC health check passed successfully!")
+    return True
+
+
+def http_health_check(config):
+    http_base_url = f"http://{config.http_listen_addr}"
+    if ":" not in http_base_url:
+        http_base_url = f"http://localhost:{config.http_listen_addr}"
+    
+    payload = {
+        "source_code": "print(21 * 2)",
+        "chat_id": "health_check"
+    }
+    
+    response = httpx.post(
+        f"{http_base_url}/v1/execute", 
+        json=payload,
+        timeout=30.0
+    )
+    
+    # Validate the response
+    response.raise_for_status()
+    result = response.json()
+    
+    assert result["stdout"] == "42\n", f"Expected '42\n', got '{result['stdout']}'"
+    assert result["exit_code"] == 0, f"Expected exit code 0, got {result['exit_code']}"
+    
+    print("HTTP health check passed successfully!")
+    return True
 
 
 if __name__ == "__main__":

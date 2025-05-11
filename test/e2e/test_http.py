@@ -6,6 +6,7 @@ import pytest
 import httpx
 from code_interpreter.config import Config
 from code_interpreter.utils.file_meta import cleanup_expired_files
+from code_interpreter.health_check import http_health_check
 
 # Helpers
 @pytest.fixture
@@ -21,7 +22,6 @@ def config():
 def read_file(file_hash: str, file_storage_path: str):
     return (Path(file_storage_path) / file_hash).read_bytes()
 
-# Tests
 def test_imports(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/using_imports.py").read_text(),
