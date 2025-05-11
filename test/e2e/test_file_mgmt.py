@@ -1,4 +1,3 @@
-# test/e2e/test_file_mgmt.py
 import io
 from pathlib import Path
 from typing import Iterator
@@ -207,6 +206,7 @@ def test_upload_then_execute(http_client):
     ex = http_client.post("/v1/execute", json=payload)
     assert ex.status_code == 200 and ex.json()["stdout"].strip() == "1"
 
+def test_upload_then_download(http_client):
 
 # TODO: Proper test: /upload followed by /download directly instead of using execute at all.
 
