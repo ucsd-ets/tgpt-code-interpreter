@@ -9,6 +9,8 @@ from code_interpreter.config import Config
 from code_interpreter.utils.file_meta import cleanup_expired_files
 import code_interpreter.health_check as hc
 
+# TODO: Add explicit test to read from sqlite3 DB as well
+
 # Helpers
 @pytest.fixture
 def http_client():

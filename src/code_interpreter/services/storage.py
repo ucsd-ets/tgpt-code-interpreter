@@ -71,7 +71,7 @@ class Storage:
                 chat_id=chat_id,
                 filename=filename
             )
-        except (FileNotFoundError, PermissionError) as e:
+        except Exception as e:
             raise e
         
         target_dir = self.storage_path / chat_id / object_hash
