@@ -4,6 +4,7 @@ import os
 from typing import AsyncIterator, Protocol, Optional
 from anyio import Path
 from pydantic import validate_call
+from code_interpreter.utils.file_meta import check_and_decrement
 
 class ObjectReader(Protocol):
     async def read(self, size: int = -1) -> bytes: ...
@@ -64,6 +65,15 @@ class Storage:
         """
         Async context manager that opens an object for reading.
         """
+        try:
+            check_and_decrement(
+                file_hash=object_hash, 
+                chat_id=chat_id,
+                filename=filename
+            )
+        except (FileNotFoundError, PermissionError) as e:
+            raise e
+        
         target_dir = self.storage_path / chat_id / object_hash
         target_file = target_dir / filename
         

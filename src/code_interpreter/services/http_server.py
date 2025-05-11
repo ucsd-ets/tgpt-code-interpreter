@@ -139,10 +139,10 @@ class ExpireResponse(BaseModel):
     success: bool
 
 def _is_internal_request(req: Request) -> bool:
-    host_ok = req.headers.get("host", "") in config.internal_host_allowlist
+    host_ok = req.headers.get("host", "") in config.internal_ip_allowlist
     ip_ok = any(
         ip_address(req.client.host) in ip_network(cidr)
-        for cidr in config.internal_host_allowlist
+        for cidr in config.internal_ip_allowlist
     )
     return host_ok or ip_ok
 
@@ -214,6 +214,15 @@ def create_http_server(
 
             logger.info("Uploaded %s (%s bytes) for chat %s",
                         upload.filename, upload.size, chat_id)
+            
+            # TODO: max downloads handling (per file, perhaps?)
+            register(
+                file_hash=dest.hash,
+                filename=upload.filename,
+                chat_id=chat_id,
+                max_downloads=0,
+            )
+
             return UploadResponse(
                 file_hash=dest.hash,
                 filename=upload.filename,

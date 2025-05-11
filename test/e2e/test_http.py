@@ -1,3 +1,4 @@
+import importlib
 import json
 from pathlib import Path
 import sqlite3
@@ -6,6 +7,7 @@ import pytest
 import httpx
 from code_interpreter.config import Config
 from code_interpreter.utils.file_meta import cleanup_expired_files
+import code_interpreter.health_check as hc
 
 # Helpers
 @pytest.fixture
@@ -21,7 +23,19 @@ def config():
 def read_file(file_hash: str, file_storage_path: str):
     return (Path(file_storage_path) / file_hash).read_bytes()
 
-# Tests
+def test_http_health_check(config):
+    """Directly exercise the low‑level HTTP health‑check helper."""
+    # Should succeed (raises on failure)
+    assert hc.http_health_check(config) is True
+
+def test_health_check_falls_back_to_http(monkeypatch, config):
+    """With gRPC disabled, ``health_check`` must fall back to HTTP and still pass."""
+    monkeypatch.setenv("APP_GRPC_ENABLED", "0")  # anything falsy works ("false", "0", "no", …)
+
+    importlib.reload(hc)
+
+    assert hc.http_health_check(config) is True
+
 def test_imports(http_client: httpx.Client):
     request_data = {
         "source_code": Path("./examples/using_imports.py").read_text(),

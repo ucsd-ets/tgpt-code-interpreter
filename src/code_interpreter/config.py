@@ -48,6 +48,9 @@ class Config(BaseSettings):
         },
     }
 
+    # enable/disable GRPC
+    grpc_enabled: bool = False
+
     # path to schema (if it exists)
     schema_path: str = ""
 

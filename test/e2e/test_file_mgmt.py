@@ -1,4 +1,3 @@
-# test/e2e/test_file_mgmt.py
 import io
 from pathlib import Path
 from typing import Iterator
@@ -207,6 +206,46 @@ def test_upload_then_execute(http_client):
     ex = http_client.post("/v1/execute", json=payload)
     assert ex.status_code == 200 and ex.json()["stdout"].strip() == "1"
 
+def test_upload_then_download(http_client):
+    # Prepare test data
+    chat_id = "upload_download_test_chat"
+    filename = "test_document.txt"
+    content = "This is a test document for direct upload/download test."
+    
+    # Upload the file
+    files = {
+        "chat_id": (None, chat_id),
+        "upload": (filename, io.BytesIO(content.encode()), "text/plain"),
+    }
+    upload_response = http_client.post("/v1/upload", files=files)
+    assert upload_response.status_code == 200
+    
+    # Extract file hash from response
+    upload_data = upload_response.json()
+    assert upload_data["chat_id"] == chat_id
+    assert upload_data["filename"] == filename
+    file_hash = upload_data["file_hash"]
+    
+    # Now download the file directly
+    download_payload = {
+        "chat_id": chat_id,
+        "file_hash": file_hash,
+        "filename": filename
+    }
+    download_response = http_client.post("/v1/download", json=download_payload)
+    
+    # Verify download was successful and content matches
+    assert download_response.status_code == 200
+    assert download_response.text == content
+    assert download_response.headers["Content-Type"].startswith("text/plain")
+    assert "Content-Disposition" in download_response.headers
+    assert filename in download_response.headers["Content-Disposition"]
+    
+    # Verify download counter works (assuming default is 0 = unlimited)
+    # Try downloading again
+    second_download = http_client.post("/v1/download", json=download_payload)
+    assert second_download.status_code == 200
+    assert second_download.text == content
 
 # ---------- /v1/expire -----------------------------------------------------
 

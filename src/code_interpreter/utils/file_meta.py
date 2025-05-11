@@ -27,8 +27,7 @@ logger = logging.getLogger("code_interpreter_service")
 def register(file_hash: str, chat_id: str, filename: str, max_downloads: int) -> None:
     """Register a file in the database with download limits"""
     if not file_hash or not chat_id or not filename:
-        logger.warning(f"Invalid parameters for file registration: hash={file_hash}, chat_id={chat_id}, filename={filename}")
-        return
+        raise TypeError(f"Invalid parameters for file registration: hash={file_hash}, chat_id={chat_id}, filename={filename}")
         
     remaining = None if max_downloads == 0 else max_downloads
     

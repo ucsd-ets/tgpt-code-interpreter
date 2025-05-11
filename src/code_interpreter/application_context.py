@@ -91,6 +91,9 @@ class ApplicationContext:
 
     @cached_property
     def grpc_servicers(self) -> list:
+        if not self.config.grpc_enabled:
+            return []
+
         return [
             CodeInterpreterServicer(
                 code_executor=self.code_executor,
@@ -111,6 +114,13 @@ class ApplicationContext:
 
     @cached_property
     def grpc_server(self) -> GrpcServer:
+        if not self.config.grpc_enabled:
+            # Return a dummy server that does nothing
+            class DummyServer:
+                async def start(self, listen_addr: str) -> None:
+                    pass
+            return DummyServer()
+
         return GrpcServer(
             servicers=self.grpc_servicers,
             server_credentials=self.grpc_server_credentials
