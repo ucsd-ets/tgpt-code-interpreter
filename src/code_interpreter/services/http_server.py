@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import base64
 from collections import defaultdict
 from ipaddress import ip_network, ip_address
@@ -40,7 +41,7 @@ from code_interpreter.services.custom_tool_executor import (
 )
 from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExecutor
 
-from code_interpreter.utils.file_meta import check_and_decrement, cleanup_expired_files, register
+from code_interpreter.utils.file_meta import check_and_decrement, cleanup_expired_files, register, get_file_info
 
 logger = logging.getLogger("code_interpreter_service")
 
@@ -73,19 +74,29 @@ def canonicalise(obj):
         return [canonicalise(i) for i in obj]
     return obj
 
+class FileMetadata(BaseModel):
+    remaining_downloads: int | None = None
+    expires_at: str | None = None
+
 class ExecuteRequest(BaseModel):
     source_code: str
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
     chat_id: str = "default"
-    limit: int | None = None
+
+    max_downloads: int | None = None
+    expires_days: int | None = None
+    expires_seconds: int | None = None
+
     persistent_workspace: bool = False
+
 
 class ExecuteResponse(BaseModel):
     stdout: str
     stderr: str
     exit_code: int
     files: Dict[AbsolutePath, Hash]
+    files_metadata: Dict[AbsolutePath, FileMetadata] = {}
     chat_id: str | None = None
 
 class ParseCustomToolRequest(BaseModel):
@@ -129,6 +140,7 @@ class UploadResponse(BaseModel):
     file_hash: str
     filename: str
     chat_id: str
+    metadata: FileMetadata
 
 class ExpireRequest(BaseModel):
     chat_id: str
@@ -141,7 +153,7 @@ class ExpireResponse(BaseModel):
 def _is_internal_request(req: Request) -> bool:
     host_ok = req.headers.get("host", "") in config.internal_ip_allowlist
     ip_ok = any(
-        ip_address(req.client.host) in ip_network(cidr)
+        ip_address(req.client.host) in ip_network(cidr) or "127.0.0.1"
         for cidr in config.internal_ip_allowlist
     )
     return host_ok or ip_ok
@@ -163,87 +175,90 @@ def create_http_server(
 ):
     # vars
     app = FastAPI()
-    
-    RATE_LIMIT = 100  # max requests per minute
-    RATE_WINDOW = 60  # window in seconds
-    ip_request_count = defaultdict(list)
 
+    async def periodic_cleanup():
+        while True:
+            try:
+                logger.info("Running scheduled file cleanup task")
+                cleanup_expired_files()
+                logger.info("Scheduled file cleanup completed")
+            except Exception as e:
+                logger.error(f"Error in periodic cleanup: {str(e)}")
+            
+            await asyncio.sleep(3 * 60 * 60) 
+        
+    asyncio.create_task(periodic_cleanup())
+    logger.info("Scheduled file cleanup task to run every 3 hours")
+    
     def set_request_id():
         request_id = str(uuid.uuid4())
         request_id_context_var.set(request_id)
         return request_id
-    
-    def rate_limiter(request: Request):
-        client_ip = request.client.host
-        now = time.time()
-        
-        # Clean old requests
-        ip_request_count[client_ip] = [t for t in ip_request_count[client_ip] if now - t < RATE_WINDOW]
-        
-        # Add current request
-        ip_request_count[client_ip].append(now)
-        
-        # Check if rate limit exceeded
-        if len(ip_request_count[client_ip]) > RATE_LIMIT:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Rate limit exceeded"
-            )
 
-    @app.post("/v1/upload", response_model=UploadResponse,
-              dependencies=[Depends(rate_limiter)])
+    @app.post("/v1/upload", response_model=UploadResponse)
     async def upload_file(
         raw_request: Request,
         chat_id: str = Form(..., pattern=r"^[0-9a-zA-Z_-]{1,255}$"),
         upload: UploadFile = File(...),
+        max_downloads: int = Form(None),
+        expires_days: int = Form(None),
+        expires_seconds: int = Form(None),
         request_id: str = Depends(set_request_id),
     ):
-        # Basic filename validation
+        _guard_spawn(raw_request)
+
+        # basic validation ------------------------------------------------------
         if not re.match(r"^[0-9A-Za-z._-]{1,255}$", upload.filename):
             raise HTTPException(400, "Invalid filename")
-
         if upload.size and upload.size > 1_073_741_824:
             raise HTTPException(413, "File too large")
 
         try:
+            # store on disk -----------------------------------------------------
             async with code_executor.file_storage.writer(
                 filename=upload.filename, chat_id=chat_id
             ) as dest:
                 while chunk := await upload.read(8192):
                     await dest.write(chunk)
 
-            logger.info("Uploaded %s (%s bytes) for chat %s",
-                        upload.filename, upload.size, chat_id)
+            # decide limits -----------------------------------------------------
+            max_dl = max_downloads if max_downloads is not None else config.global_max_downloads
+            download_text = "unlimited" if max_dl == 0 else max_dl
+            expiry_text = f"{expires_days} days" if expires_days else "never"
             
-            # TODO: max downloads handling (per file, perhaps?)
+            logger.info("Uploaded %s (%s bytes) for chat %s, max downloads: %s, expires: %s",
+                        upload.filename, upload.size, chat_id, download_text, expiry_text)
+            
             register(
                 file_hash=dest.hash,
                 filename=upload.filename,
                 chat_id=chat_id,
-                max_downloads=0,
+                max_downloads=max_dl,
+                days_to_expire=expires_days,
+                expires_seconds=expires_seconds,
             )
 
+            meta = get_file_info(dest.hash, chat_id, upload.filename)
             return UploadResponse(
                 file_hash=dest.hash,
                 filename=upload.filename,
                 chat_id=chat_id,
+                metadata=FileMetadata(
+                    remaining_downloads=meta["remaining_downloads"],
+                    expires_at=meta["expires_at"],
+                ),
             )
+        except Exception as exc:
+            logger.error("Upload failed: %s", exc, exc_info=True)
+            raise HTTPException(500, "Upload failed.")
 
-        except Exception as e:
-            logger.error("Upload failed: %s", e, exc_info=True)
-            raise HTTPException(500, f"Upload failed: {e}")
 
-    @app.post("/v1/expire", response_model=ExpireResponse,
-              dependencies=[Depends(rate_limiter)])
+    @app.post("/v1/expire", response_model=ExpireResponse)
     async def expire_file(
         raw_request: Request,
         request: ExpireRequest,
         request_id: str = Depends(set_request_id),
     ):
-        """
-        Immediately sets the remaining-downloads counter to 0 for a stored
-        object, rendering any future download calls invalid.
-        """
         try:
             from code_interpreter.utils.file_meta import expire
             expire(
@@ -263,16 +278,13 @@ def create_http_server(
             logger.error("Expire failed: %s", e, exc_info=True)
             raise HTTPException(500, f"Expire failed: {e}")
 
-    @app.post("/v1/download", response_model=FileResponse, dependencies=[Depends(rate_limiter)])
+    @app.post("/v1/download", response_model=FileResponse)
     async def download(
         raw_request: Request,
         request: FileRequest,
         background_tasks: BackgroundTasks,
         request_id: str = Depends(set_request_id),
     ):
-        # Run cleanup in background
-        background_tasks.add_task(cleanup_expired_files)
-        
         # Validate input parameters to prevent path traversal
         if not request.file_hash or not re.match(r'^[0-9a-zA-Z_-]{1,255}$', request.file_hash):
             raise HTTPException(400, "Invalid file hash format")
@@ -347,84 +359,68 @@ def create_http_server(
         request_id: str = Depends(set_request_id),
     ):
         _guard_spawn(raw_request)
-        """
-        1. Read the raw body.
-        2. json.loads → if broken, fall back to json-repair.
-        3. Unwrap {"requestBody": {...}} wrappers.
-        4. Canonicalise keys (aliases + camel→snake).
-        5. Optionally validate against BEE_SCHEMA_PATH.
-        6. Cast to ExecuteRequest and run the sandbox.
-        """
-        logger.info("Sanitizing incoming request")
 
-        # 1. grab bytes
-        raw_bytes = await raw_request.body()
+        payload = json.loads(await raw_request.body())
 
-        # 2. parse or repair
-        '''
-        try:
-            payload = json.loads(raw_bytes)
-        except json.JSONDecodeError:
-            try:
-                fixed = repair_json(raw_bytes.decode())
-                payload = json.loads(fixed)
-                logger.debug("json-repair applied")
-            except Exception as e:
-                raise HTTPException(422, f"json-repair failed: {e}") from e
-        '''
-        payload = json.loads(raw_bytes)
-
-        # 3. drop unnecessary wrapper
         if isinstance(payload, dict) and set(payload) == {"requestBody"}:
-            payload = payload["requestBody"]
+            payload = payload["requestBody"] 
 
-        # 4. canonicalise keys (aliases, camel→snake)
         payload = canonicalise(payload)
 
-        # 5. schema validation (if _validate is configured)
         if _validate:
-            try:
-                _validate(payload)
-            except Exception as e:
-                raise HTTPException(422, f"schema validation failed: {e}") from e
+            _validate(payload)
 
-        # 6. pydantic cast
         request = ExecuteRequest.model_validate(payload)
 
-        logger.info(
-            "Executing code with files %s: %s", request.files, request.source_code
-        )
+        if config.require_chat_id and not request.chat_id:
+                raise HTTPException(403, "Chat ID required but not provided in request")
+
+        logger.info("Executing code with files %s", request.files)
         try:
             result = await code_executor.execute(
                 source_code=request.source_code,
                 files=request.files,
                 env=request.env,
                 chat_id=request.chat_id,
-                persistent_workspace=request.persistent_workspace
+                persistent_workspace=request.persistent_workspace,
+            )
+            files_metadata: Dict[AbsolutePath, FileMetadata] = {}
+
+            if request.persistent_workspace and result.files:
+                for abs_path, file_hash in result.files.items():
+                    filename = os.path.basename(abs_path)
+
+                    register(
+                        file_hash=file_hash,
+                        chat_id=request.chat_id,
+                        filename=filename,
+                        max_downloads=request.max_downloads,
+                        days_to_expire=request.expires_days,
+                        expires_seconds=request.expires_seconds,
+                    )
+
+                    info = get_file_info(file_hash, request.chat_id, filename)
+                    files_metadata[abs_path] = FileMetadata(
+                        remaining_downloads=info["remaining_downloads"],
+                        expires_at=info["expires_at"],
+                    )
+
+            response = ExecuteResponse(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                files=result.files,
+                files_metadata=files_metadata,
+                chat_id=result.chat_id,
             )
 
-            # Store files into sqlite DB
-            if request.persistent_workspace:
-                try:
-                    if config.require_chat_id and not request.chat_id:
-                        raise HTTPException(403, "Chat ID required but not provided in request")
-                        
-                    for file_path, file_hash in result.files.items():
-                        filename = os.path.basename(file_path)
-                        register(
-                            file_hash=file_hash,
-                            chat_id=request.chat_id,
-                            filename=filename,
-                            max_downloads=(request.limit if request.limit is not None else config.global_max_downloads),
-                        )
-                except Exception as e:
-                    logger.error(f"Error registering files: {str(e)}")
+            logger.info("Code execution completed with result %s", result)
+            return response
+    
         except Exception as e:
-            logger.exception("Error executing code")
+            logger.exception(f"Error executing code: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
-        logger.info("Code execution completed with result %s", result)
-        return result
 
     @app.post(
         "/v1/parse-custom-tool",

@@ -43,7 +43,7 @@ class Config(BaseSettings):
         "loggers": {
             "kubectl": {"level": "INFO"},
             "grpc_server": {"level": "INFO"},
-            "code_interpreter_servicer": {"level": "INFO"},
+            "code_interpreter_service": {"level": "INFO"},
             "kubernetes_code_executor": {"level": "INFO"},
         },
     }
