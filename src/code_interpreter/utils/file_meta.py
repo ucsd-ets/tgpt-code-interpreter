@@ -26,37 +26,59 @@ _CONN.execute("""
 
 logger = logging.getLogger("code_interpreter_service")
 
-def register(file_hash: str, chat_id: str, filename: str, max_downloads: int = None, days_to_expire: int = None) -> None:
-    """Register a file in the database with download limits"""
+def register(
+    file_hash: str,
+    chat_id: str,
+    filename: str,
+    max_downloads: int | None = None,
+    days_to_expire: int | None = None,
+    expires_seconds: int | None = None,
+) -> None:
+    """
+    Insert or update a file-metadata row.
+    """
     if not file_hash or not chat_id or not filename:
-        raise TypeError(f"Invalid parameters for file registration: hash={file_hash}, chat_id={chat_id}, filename={filename}")
-        
+        raise TypeError(
+            f"Invalid parameters for file registration: "
+            f"hash={file_hash}, chat_id={chat_id}, filename={filename}"
+        )
+
+    # ---------------- download‑limit -------------------------------------
     if max_downloads is None:
         max_downloads = config.global_max_downloads
-    
-    # Set remaining to NULL for unlimited (0)
-    remaining = None if max_downloads == 0 else max_downloads
-    
-    # Calculate expiry date if needed
-    expires_at = None
+    remaining: int | None = None if max_downloads == 0 else max_downloads
+
+    # ---------------- expiry timestamp -----------------------------------
+    expires_at: str | None = None
+    choices: list[datetime.timedelta] = []
     if days_to_expire and days_to_expire > 0:
-        expires_at = (datetime.datetime.now() + datetime.timedelta(days=days_to_expire)).isoformat()
-    
+        choices.append(datetime.timedelta(days=days_to_expire))
+    if expires_seconds and expires_seconds > 0:
+        choices.append(datetime.timedelta(seconds=expires_seconds))
+    if choices:
+        expires_at = (datetime.datetime.now() + min(choices)).isoformat()
+
     try:
         _CONN.execute(
             """
-            INSERT INTO files(file_hash, chat_id, filename, remaining, expires_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO files (file_hash, chat_id, filename, remaining, expires_at)
+            VALUES (?,?,?,?,?)
             ON CONFLICT(file_hash, chat_id, filename) DO UPDATE
-              SET remaining = excluded.remaining, expires_at = excluded.expires_at;
+              SET remaining  = excluded.remaining,
+                  expires_at = excluded.expires_at;
             """,
             (file_hash, chat_id, filename, remaining, expires_at),
         )
-        logger.debug(f"Registered file {filename} ({file_hash}) for chat {chat_id} with " + 
-                    f"{remaining if remaining is not None else 'unlimited'} downloads, " +
-                    f"expires: {expires_at if expires_at else 'never'}")
-    except Exception as e:
-        logger.error(f"Error registering file: {str(e)}")
+        dl_txt  = "unlimited" if remaining is None else remaining
+        exp_txt = expires_at or "never"
+        logger.debug(
+            "Registered %s/%s (%s) - dl=%s, exp=%s",
+            chat_id, file_hash, filename, dl_txt, exp_txt
+        )
+    except Exception as exc:
+        logger.error("Error registering file: %s", exc, exc_info=True)
+
+
 
 def check_and_decrement(file_hash: str, chat_id: str, filename: str) -> None:
     """Check if a file can be downloaded and decrement its download counter"""

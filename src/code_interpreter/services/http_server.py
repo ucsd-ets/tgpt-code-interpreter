@@ -83,9 +83,13 @@ class ExecuteRequest(BaseModel):
     files: Dict[AbsolutePath, Hash] = {}
     env: Dict[str, str] = {}
     chat_id: str = "default"
+
     max_downloads: int | None = None
     expires_days: int | None = None
+    expires_seconds: int | None = None
+
     persistent_workspace: bool = False
+
 
 class ExecuteResponse(BaseModel):
     stdout: str
@@ -198,26 +202,27 @@ def create_http_server(
         upload: UploadFile = File(...),
         max_downloads: int = Form(None),
         expires_days: int = Form(None),
+        expires_seconds: int = Form(None),
         request_id: str = Depends(set_request_id),
     ):
         _guard_spawn(raw_request)
 
-        # Basic filename validation
+        # basic validation ------------------------------------------------------
         if not re.match(r"^[0-9A-Za-z._-]{1,255}$", upload.filename):
             raise HTTPException(400, "Invalid filename")
-
         if upload.size and upload.size > 1_073_741_824:
             raise HTTPException(413, "File too large")
 
         try:
+            # store on disk -----------------------------------------------------
             async with code_executor.file_storage.writer(
                 filename=upload.filename, chat_id=chat_id
             ) as dest:
                 while chunk := await upload.read(8192):
                     await dest.write(chunk)
 
+            # decide limits -----------------------------------------------------
             max_dl = max_downloads if max_downloads is not None else config.global_max_downloads
-        
             download_text = "unlimited" if max_dl == 0 else max_dl
             expiry_text = f"{expires_days} days" if expires_days else "never"
             
@@ -230,23 +235,23 @@ def create_http_server(
                 chat_id=chat_id,
                 max_downloads=max_dl,
                 days_to_expire=expires_days,
+                expires_seconds=expires_seconds,
             )
 
-            file_info = get_file_info(dest.hash, chat_id, upload.filename)
-            
+            meta = get_file_info(dest.hash, chat_id, upload.filename)
             return UploadResponse(
                 file_hash=dest.hash,
                 filename=upload.filename,
                 chat_id=chat_id,
                 metadata=FileMetadata(
-                    remaining_downloads=file_info.get("remaining_downloads"),
-                    expires_at=file_info.get("expires_at")
-                )
+                    remaining_downloads=meta["remaining_downloads"],
+                    expires_at=meta["expires_at"],
+                ),
             )
+        except Exception as exc:
+            logger.error("Upload failed: %s", exc, exc_info=True)
+            raise HTTPException(500, "Upload failed.")
 
-        except Exception as e:
-            logger.error("Upload failed: %s", e, exc_info=True)
-            raise HTTPException(500, f"Upload failed. Please try again later.")
 
     @app.post("/v1/expire", response_model=ExpireResponse)
     async def expire_file(
@@ -354,108 +359,68 @@ def create_http_server(
         request_id: str = Depends(set_request_id),
     ):
         _guard_spawn(raw_request)
-        """
-        1. Read the raw body.
-        2. json.loads → if broken, fall back to json-repair.
-        3. Unwrap {"requestBody": {...}} wrappers.
-        4. Canonicalise keys (aliases + camel→snake).
-        5. Optionally validate against BEE_SCHEMA_PATH.
-        6. Cast to ExecuteRequest and run the sandbox.
-        """
-        logger.info("Sanitizing incoming request")
 
-        # 1. grab bytes
-        raw_bytes = await raw_request.body()
+        payload = json.loads(await raw_request.body())
 
-        # 2. parse or repair
-        '''
-        try:
-            payload = json.loads(raw_bytes)
-        except json.JSONDecodeError:
-            try:
-                fixed = repair_json(raw_bytes.decode())
-                payload = json.loads(fixed)
-                logger.debug("json-repair applied")
-            except Exception as e:
-                raise HTTPException(422, f"json-repair failed: {e}") from e
-        '''
-        payload = json.loads(raw_bytes)
-
-        # 3. drop unnecessary wrapper
         if isinstance(payload, dict) and set(payload) == {"requestBody"}:
-            payload = payload["requestBody"]
+            payload = payload["requestBody"] 
 
-        # 4. canonicalise keys (aliases, camel→snake)
         payload = canonicalise(payload)
 
-        # 5. schema validation (if _validate is configured)
         if _validate:
-            try:
-                _validate(payload)
-            except Exception as e:
-                raise HTTPException(422, f"schema validation failed: {e}") from e
+            _validate(payload)
 
-        # 6. pydantic cast
         request = ExecuteRequest.model_validate(payload)
 
-        logger.info(
-            "Executing code with files %s: %s", request.files, request.source_code
-        )
+        if config.require_chat_id and not request.chat_id:
+                raise HTTPException(403, "Chat ID required but not provided in request")
+
+        logger.info("Executing code with files %s", request.files)
         try:
             result = await code_executor.execute(
                 source_code=request.source_code,
                 files=request.files,
                 env=request.env,
                 chat_id=request.chat_id,
-                persistent_workspace=request.persistent_workspace
+                persistent_workspace=request.persistent_workspace,
+            )
+            files_metadata: Dict[AbsolutePath, FileMetadata] = {}
+
+            if request.persistent_workspace and result.files:
+                for abs_path, file_hash in result.files.items():
+                    filename = os.path.basename(abs_path)
+
+                    register(
+                        file_hash=file_hash,
+                        chat_id=request.chat_id,
+                        filename=filename,
+                        max_downloads=request.max_downloads,
+                        days_to_expire=request.expires_days,
+                        expires_seconds=request.expires_seconds,
+                    )
+
+                    info = get_file_info(file_hash, request.chat_id, filename)
+                    files_metadata[abs_path] = FileMetadata(
+                        remaining_downloads=info["remaining_downloads"],
+                        expires_at=info["expires_at"],
+                    )
+
+            response = ExecuteResponse(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                files=result.files,
+                files_metadata=files_metadata,
+                chat_id=result.chat_id,
             )
 
-            # Store files into sqlite DB
-            if request.persistent_workspace:
-                try:
-                    if config.require_chat_id and not request.chat_id:
-                        raise HTTPException(403, "Chat ID required but not provided in request")
-                    
-                    max_downloads = request.max_downloads
-                    
-                    files_metadata = {}
-                    
-                    for file_path, file_hash in result.files.items():
-                        filename = os.path.basename(file_path)
-                        register(
-                            file_hash=file_hash,
-                            chat_id=request.chat_id,
-                            filename=filename,
-                            max_downloads=max_downloads,
-                            days_to_expire=request.expires_days,
-                        )
-                        
-                        try:
-                            file_info = get_file_info(file_hash, request.chat_id, filename)
-                            files_metadata[file_path] = FileMetadata(
-                                remaining_downloads=file_info.get("remaining_downloads"),
-                                expires_at=file_info.get("expires_at")
-                            )
-                        except Exception as e:
-                            logger.error(f"Error getting file metadata: {str(e)}")
-                    
-                    result = ExecuteResponse(
-                        stdout=result.stdout,
-                        stderr=result.stderr,
-                        exit_code=result.exit_code,
-                        files=result.files,
-                        files_metadata=files_metadata,
-                        chat_id=result.chat_id
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Error registering files: {str(e)}")
+            logger.info("Code execution completed with result %s", result)
+            return response
+    
         except Exception as e:
-            logger.exception("Error executing code")
+            logger.exception(f"Error executing code: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
-        logger.info("Code execution completed with result %s", result)
-        return result
 
     @app.post(
         "/v1/parse-custom-tool",

@@ -2,6 +2,7 @@ from datetime import timedelta
 import datetime
 import io
 from pathlib import Path
+import time
 from typing import Iterator
 from unittest.mock import patch
 
@@ -223,55 +224,29 @@ def test_execute_with_download_limit(http_client):
     assert exceeded_response.status_code == 404
 
 
-def test_execute_with_expiry_date(http_client):
-    """Test executing code that creates a file with expiry date"""
-    chat_id = "execute_expiry_test_chat"
-    filename = "execute_expiring.txt"
-    content = "File created by execution with expiry"
-    expires_days = 3
-    
-    execute_payload = {
-        "source_code": f'from pathlib import Path; Path("{filename}").write_text("{content}")',
-        "chat_id": chat_id,
-        "persistent_workspace": True,
-        "expires_days": expires_days
-    }
-    
-    execute_response = http_client.post("/v1/execute", json=execute_payload)
-    assert execute_response.status_code == 200
-    
-    # Get the file hash
-    result = execute_response.json()
-    file_path = f"/workspace/{filename}"
-    assert file_path in result["files"]
-    file_hash = result["files"][file_path]
-    
-    # Check metadata is returned with expiry info
-    assert "files_metadata" in result
-    assert file_path in result["files_metadata"]
-    assert result["files_metadata"][file_path]["expires_at"] is not None
-    
-    download_payload = {
-        "chat_id": chat_id,
-        "file_hash": file_hash,
-        "filename": filename
-    }
-    download_response = http_client.post("/v1/download", json=download_payload)
-    assert download_response.status_code == 200
-    assert download_response.text == content
-    
-    # Mock datetime to simulate time passing beyond expiry
-    future_date = datetime.datetime.now() + timedelta(days=4)
-    
-    with patch('code_interpreter.utils.file_meta.datetime') as mock_datetime:
-        mock_datetime.now.return_value = future_date
-        mock_datetime.fromisoformat = datetime.datetime.fromisoformat
-        
-        cleanup_expired_files()
-        
-        # Try to download after expiry
-        expired_response = http_client.post("/v1/download", json=download_payload)
-        assert expired_response.status_code == 404, "File should be inaccessible after expiry date"
+def test_execute_with_expiry_seconds(http_client):
+    """File created via /v1/execute should auto‑expire after 3 s."""
+    chat_id  = "execute_expiry_sec_chat"
+    filename = "auto_expire_exec.txt"
+    content  = "short‑lived file"
+
+    rsp = http_client.post(
+        "/v1/execute",
+        json={
+            "source_code": f'from pathlib import Path; Path("{filename}").write_text("{content}")',
+            "chat_id": chat_id,
+            "persistent_workspace": True,
+            "expires_seconds": 3,
+        },
+    )
+    assert rsp.status_code == 200
+    file_hash = rsp.json()["files"][f"/workspace/{filename}"]
+
+    payload = {"chat_id": chat_id, "file_hash": file_hash, "filename": filename}
+    assert http_client.post("/v1/download", json=payload).status_code == 200
+
+    time.sleep(5)
+    assert http_client.post("/v1/download", json=payload).status_code == 404
 
 # ---------- /v1/upload -----------------------------------------------------
 
@@ -384,54 +359,28 @@ def test_upload_with_download_limit(http_client):
     assert exceeded_response.status_code == 404
 
 
-def test_upload_with_expiry_date(http_client):
-    """Test uploading a file with expiry date"""
-    # Prepare test data
-    chat_id = "upload_expiry_test_chat"
-    filename = "expiring_file.txt"
-    content = "This file expires soon"
-    # Set to expire in 1 day
-    expires_days = 1
-    
-    # Upload the file with expiry date
-    files = {
-        "chat_id": (None, chat_id),
-        "upload": (filename, io.BytesIO(content.encode()), "text/plain"),
-        "expires_days": (None, str(expires_days)),
-    }
-    upload_response = http_client.post("/v1/upload", files=files)
-    assert upload_response.status_code == 200
-    
-    # Extract file info from response
-    upload_data = upload_response.json()
-    assert upload_data["chat_id"] == chat_id
-    assert upload_data["filename"] == filename
-    assert "metadata" in upload_data
-    assert upload_data["metadata"]["expires_at"] is not None
-    file_hash = upload_data["file_hash"]
-    
-    # Verify file can be downloaded now
-    download_payload = {
-        "chat_id": chat_id,
-        "file_hash": file_hash,
-        "filename": filename
-    }
-    download_response = http_client.post("/v1/download", json=download_payload)
-    assert download_response.status_code == 200
-    assert download_response.text == content
-    
-    # Mock datetime to simulate time passing beyond expiry
-    future_date = datetime.datetime.now() + timedelta(days=2)
+def test_upload_with_expiry_seconds(http_client):
+    """File uploaded with expires_seconds should vanish after the interval."""
+    chat_id  = "upload_expiry_sec_chat"
+    filename = "auto_expire_upload.txt"
+    content  = "ephemeral upload"
 
-    with patch('code_interpreter.utils.file_meta.datetime') as mock_datetime:
-        mock_datetime.now.return_value = future_date
-        mock_datetime.fromisoformat = datetime.datetime.fromisoformat
-        
-        cleanup_expired_files()
-        
-        # Try to download after expiry
-        expired_response = http_client.post("/v1/download", json=download_payload)
-        assert expired_response.status_code == 404, "File should be inaccessible after expiry date"
+    up = http_client.post(
+        "/v1/upload",
+        files={
+            "chat_id":        (None, chat_id),
+            "upload":         (filename, io.BytesIO(content.encode()), "text/plain"),
+            "expires_seconds":(None, "3"),
+        },
+    )
+    assert up.status_code == 200
+    file_hash = up.json()["file_hash"]
+
+    payload = {"chat_id": chat_id, "file_hash": file_hash, "filename": filename}
+    assert http_client.post("/v1/download", json=payload).status_code == 200
+
+    time.sleep(5)
+    assert http_client.post("/v1/download", json=payload).status_code == 404
 
 def test_upload_metadata_response(http_client):
     """Test that upload returns proper file metadata"""
@@ -463,43 +412,29 @@ def test_upload_metadata_response(http_client):
     days_diff = (expiry_date - datetime.datetime.now()).days
     assert days_diff in [expires_days - 1, expires_days], f"Expected expiry about {expires_days} days in future, got {days_diff} days"
 
-def test_combine_download_limit_and_expiry(http_client):
-    """Test that files can have both download limit and expiry date, and either can trigger expiry"""
-    chat_id = "dual_expiry_test_chat"
-    filename = "dual_expiry.txt"
-    content = "This file expires by count or date, whichever comes first"
-    max_downloads = 3
-    expires_days = 5
-    
-    files = {
-        "chat_id": (None, chat_id),
-        "upload": (filename, io.BytesIO(content.encode()), "text/plain"),
-        "max_downloads": (None, str(max_downloads)),
-        "expires_days": (None, str(expires_days)),
-    }
-    upload_response = http_client.post("/v1/upload", files=files)
-    assert upload_response.status_code == 200
-    
-    file_hash = upload_response.json()["file_hash"]
-    download_payload = {
-        "chat_id": chat_id,
-        "file_hash": file_hash,
-        "filename": filename
-    }
+def test_combine_limit_and_expiry_seconds(http_client):
+    """Expiry seconds should trump remaining download quota once time passes."""
+    chat_id  = "dual_expiry_sec_chat"
+    filename = "dual_expire_sec.txt"
+    content  = "both count and timer"
 
-    downloaded_copy = http_client.post("/v1/download", json=download_payload)
-    assert downloaded_copy.status_code == 200
-    assert downloaded_copy.text == content
-    
-    with patch('code_interpreter.utils.file_meta.datetime') as mock_datetime:
-        future_date = datetime.datetime.now() + timedelta(days=6)
-        mock_datetime.datetime.now.return_value = future_date
-        mock_datetime.datetime.fromisoformat = datetime.datetime.fromisoformat
-        
-        cleanup_expired_files()
-        
-        date_expired = http_client.post("/v1/download", json=download_payload)
-        assert date_expired.status_code == 404, "File should expire by date"
+    up = http_client.post(
+        "/v1/upload",
+        files={
+            "chat_id":        (None, chat_id),
+            "upload":         (filename, io.BytesIO(content.encode()), "text/plain"),
+            "max_downloads":  (None, "5"),
+            "expires_seconds":(None, "3"),
+        },
+    )
+    assert up.status_code == 200
+    file_hash = up.json()["file_hash"]
+
+    payload = {"chat_id": chat_id, "file_hash": file_hash, "filename": filename}
+    assert http_client.post("/v1/download", json=payload).status_code == 200
+
+    time.sleep(5)
+    assert http_client.post("/v1/download", json=payload).status_code == 404
 
 # ---------- /v1/expire -----------------------------------------------------
 
