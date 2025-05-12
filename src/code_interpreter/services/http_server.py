@@ -141,7 +141,7 @@ class ExpireResponse(BaseModel):
 def _is_internal_request(req: Request) -> bool:
     host_ok = req.headers.get("host", "") in config.internal_ip_allowlist
     ip_ok = any(
-        ip_address(req.client.host) in ip_network(cidr)
+        ip_address(req.client.host) in ip_network(cidr) or "127.0.0.1"
         for cidr in config.internal_ip_allowlist
     )
     return host_ok or ip_ok
