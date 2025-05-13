@@ -36,6 +36,7 @@ class Storage:
             filename: Original filename to preserve
             chat_id: ID of the chat this file belongs to
         """
+        # Randomly generated HASH
         hash = secrets.token_hex(32)
         
         # Create directory structure

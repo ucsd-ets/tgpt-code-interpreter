@@ -195,6 +195,7 @@ def create_http_server(
         request_id_context_var.set(request_id)
         return request_id
 
+    # TODO: Fix malicious uploading, dont just read limit field
     @app.post("/v1/upload", response_model=UploadResponse)
     async def upload_file(
         raw_request: Request,
