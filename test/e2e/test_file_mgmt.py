@@ -433,7 +433,7 @@ def test_combine_limit_and_expiry_seconds(http_client):
     payload = {"chat_id": chat_id, "file_hash": file_hash, "filename": filename}
     assert http_client.post("/v1/download", json=payload).status_code == 200
 
-    time.sleep(5)
+    time.sleep(4)
     assert http_client.post("/v1/download", json=payload).status_code == 404
 
 # ---------- /v1/expire -----------------------------------------------------
@@ -472,3 +472,32 @@ def test_expire_success(http_client, _persist_file):
     assert http_client.post("/v1/download",
                             json=dict(chat_id=chat, file_hash=h, filename=fname)
                             ).status_code == 404
+
+@pytest.mark.timeout(180)
+def test_workspace_quota_enforced(http_client: httpx.Client):
+    """
+    Executor pod should hit 'No space left on device' (ENOSPC) before it
+    manages to write more than the 1 GiB quota.
+    """
+    # 1 MiB chunk written 1 200 times  ≈ 1.2 GiB
+    source = """
+import os, sys
+chunk = b"0" * (1024 * 1024)        # 1 MiB
+try:
+    with open("huge.bin", "wb") as f:
+        for i in range(1200):
+            f.write(chunk)
+    print("UNEXPECTED SUCCESS")      # should never hit
+except OSError as e:
+    # Propagate errno so the interpreter exits non-zero
+    print("Caught:", e)
+    sys.exit(1 if e.errno != 0 else 2)
+"""
+    r = http_client.post("/v1/execute", json={"source_code": source})
+    assert r.status_code == 200
+
+    payload = r.json()
+    print(str(payload))
+    # Quota breach should lead to non-zero exit and ENOSPC in stderr
+    assert payload["exit_code"] != 0, "code ran to completion (quota not enforced?)"
+    assert "No space left" in payload["stderr"] or "No space left" in payload["stdout"]

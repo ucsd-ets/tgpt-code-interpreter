@@ -217,6 +217,7 @@ The service can be configured using environment variables with the `APP_` prefix
 | `APP_GLOBAL_MAX_DOWNLOADS` | integer | `0` | Default download limit (0 = unlimited) |
 | `APP_INTERNAL_HOST_ALLOWLIST` | list | `[]` | Hosts allowed to execute code when public spawn is disabled |
 | `APP_INTERNAL_IP_ALLOWLIST` | list | `[]` | IPs allowed to execute code when public spawn is disabled |
+| `APP_WORKSPACE_SIZE_LIMIT` | string | `1Gi` | Kubernetes storage limit for /workspace before user receives an out of storage error. |
 
 For TLS configuration:
 - `APP_GRPC_TLS_CERT`: TLS certificate content

@@ -191,9 +191,11 @@ class KubernetesCodeExecutor:
         wait=wait_exponential(multiplier=1, min=4, max=10),
     )
     async def spawn_executor_pod(self):
+        # cache the controller-pod meta once
         if self.self_pod is None:
             self.self_pod = await self.kubectl.get("pod", os.environ["HOSTNAME"])
 
+        # unique pod name: code-executor-xxxxxx
         name = self.executor_pod_name_prefix + "".join(
             random.choice(string.ascii_lowercase + string.digits) for _ in range(6)
         )
@@ -207,33 +209,50 @@ class KubernetesCodeExecutor:
                     "metadata": {
                         "name": name,
                         "ownerReferences": [
-                            {
+                            {   # tie lifetime to this controller pod
                                 "apiVersion": "v1",
                                 "kind": "Pod",
                                 "name": self.self_pod["metadata"]["name"],
-                                "uid": self.self_pod["metadata"]["uid"],
+                                "uid":  self.self_pod["metadata"]["uid"],
                                 "controller": True,
                                 "blockOwnerDeletion": False,
                             }
                         ],
                     },
                     "spec": {
+                        "volumes": [
+                            {
+                                "name": "workspace",
+                                "emptyDir": {
+                                    "medium": "Memory",
+                                    "sizeLimit": config.workspace_size_limit,
+                                },
+                            }
+                        ],
                         "containers": [
                             {
-                                "name": "executor",
+                                "name":  "executor",
                                 "image": self.executor_image,
                                 "resources": self.container_resources,
                                 "ports": [{"containerPort": 8000}],
+                                "volumeMounts": [
+                                    {"name": "workspace", "mountPath": "/workspace"}
+                                ],
                             }
                         ],
+                        # allow extra spec tweaks from config
                         **self.executor_pod_spec_extra,
                     },
                 },
             )
+
+            # wait until Ready (≤60 s)
             return await self.kubectl.wait(
                 "pod", name, _for="condition=Ready", timeout="60s"
             )
+
         except Exception:
+            # best-effort cleanup if creation fails
             try:
                 await self.kubectl.delete("pod", name)
             finally:
