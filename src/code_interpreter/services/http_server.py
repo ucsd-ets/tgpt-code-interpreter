@@ -43,6 +43,9 @@ from code_interpreter.services.kubernetes_code_executor import KubernetesCodeExe
 
 from code_interpreter.utils.file_meta import check_and_decrement, cleanup_expired_files, register, get_file_info
 
+from kubernetes.utils.quantity import parse_quantity
+from code_interpreter.utils.validation import parse_duration
+
 logger = logging.getLogger("code_interpreter_service")
 
 config = Config()
@@ -85,8 +88,7 @@ class ExecuteRequest(BaseModel):
     chat_id: str = "default"
 
     max_downloads: int | None = None
-    expires_days: int | None = None
-    expires_seconds: int | None = None
+    expires_in: str | None = None
 
     persistent_workspace: bool = False
 
@@ -202,44 +204,54 @@ def create_http_server(
         chat_id: str = Form(..., pattern=r"^[0-9a-zA-Z_-]{1,255}$"),
         upload: UploadFile = File(...),
         max_downloads: int = Form(None),
-        expires_days: int = Form(None),
-        expires_seconds: int = Form(None),
+        expires_in: str | None = Form(None),
         request_id: str = Depends(set_request_id),
     ):
         _guard_spawn(raw_request)
 
-        # basic validation ------------------------------------------------------
         if not re.match(r"^[0-9A-Za-z._-]{1,255}$", upload.filename):
             raise HTTPException(400, "Invalid filename")
-        if upload.size and upload.size > 1_073_741_824:
-            raise HTTPException(413, "File too large")
+
+        # convert K8s quantity ("1Gi") → int bytes using k8s-client helper
+        try:
+            max_bytes = int(parse_quantity(config.file_size_limit))
+        except Exception as e:
+            logger.error("Bad file_size_limit %s - %s",
+                         config.file_size_limit, e, exc_info=True)
+            max_bytes = 1_073_741_824
+
+        if upload.size and upload.size > max_bytes:
+            raise HTTPException(
+                413,
+                f"File too large (>{config.file_size_limit}).",
+            )
 
         try:
-            # store on disk -----------------------------------------------------
             async with code_executor.file_storage.writer(
                 filename=upload.filename, chat_id=chat_id
             ) as dest:
                 while chunk := await upload.read(8192):
                     await dest.write(chunk)
 
-            # decide limits -----------------------------------------------------
-            max_dl = max_downloads if max_downloads is not None else config.global_max_downloads
-            download_text = "unlimited" if max_dl == 0 else max_dl
-            expiry_text = f"{expires_days} days" if expires_days else "never"
-            
-            logger.info("Uploaded %s (%s bytes) for chat %s, max downloads: %s, expires: %s",
-                        upload.filename, upload.size, chat_id, download_text, expiry_text)
-            
             register(
                 file_hash=dest.hash,
                 filename=upload.filename,
                 chat_id=chat_id,
-                max_downloads=max_dl,
-                days_to_expire=expires_days,
-                expires_seconds=expires_seconds,
+                max_downloads=max_downloads,
+                expires_in=expires_in,
             )
 
             meta = get_file_info(dest.hash, chat_id, upload.filename)
+
+            logger.info(
+                "Uploaded %s (%d bytes) to chat %s (dl=%s, exp=%s)",
+                upload.filename,
+                upload.size or -1,
+                chat_id,
+                meta['remaining_downloads'] or "∞",
+                meta['expires_at'] or "never",
+            )
+
             return UploadResponse(
                 file_hash=dest.hash,
                 filename=upload.filename,
@@ -249,6 +261,9 @@ def create_http_server(
                     expires_at=meta["expires_at"],
                 ),
             )
+
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error("Upload failed: %s", exc, exc_info=True)
             raise HTTPException(500, "Upload failed.")
@@ -362,21 +377,18 @@ def create_http_server(
         _guard_spawn(raw_request)
 
         payload = json.loads(await raw_request.body())
-
         if isinstance(payload, dict) and set(payload) == {"requestBody"}:
-            payload = payload["requestBody"] 
+            payload = payload["requestBody"]
 
         payload = canonicalise(payload)
-
         if _validate:
             _validate(payload)
 
         request = ExecuteRequest.model_validate(payload)
 
         if config.require_chat_id and not request.chat_id:
-                raise HTTPException(403, "Chat ID required but not provided in request")
+            raise HTTPException(403, "Chat ID required but missing")
 
-        logger.info("Executing code with files %s", request.files)
         try:
             result = await code_executor.execute(
                 source_code=request.source_code,
@@ -385,6 +397,7 @@ def create_http_server(
                 chat_id=request.chat_id,
                 persistent_workspace=request.persistent_workspace,
             )
+
             files_metadata: Dict[AbsolutePath, FileMetadata] = {}
 
             if request.persistent_workspace and result.files:
@@ -396,8 +409,7 @@ def create_http_server(
                         chat_id=request.chat_id,
                         filename=filename,
                         max_downloads=request.max_downloads,
-                        days_to_expire=request.expires_days,
-                        expires_seconds=request.expires_seconds,
+                        expires_in=request.expires_in,
                     )
 
                     info = get_file_info(file_hash, request.chat_id, filename)
@@ -406,7 +418,7 @@ def create_http_server(
                         expires_at=info["expires_at"],
                     )
 
-            response = ExecuteResponse(
+            return ExecuteResponse(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 exit_code=result.exit_code,
@@ -414,14 +426,13 @@ def create_http_server(
                 files_metadata=files_metadata,
                 chat_id=result.chat_id,
             )
-
+        
             logger.info("Code execution completed with result %s", result)
             return response
-    
-        except Exception as e:
-            logger.exception(f"Error executing code: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
 
+        except Exception as e:
+            logger.exception("Execution failure: %s", e)
+            raise HTTPException(500, str(e))
 
     @app.post(
         "/v1/parse-custom-tool",

@@ -225,7 +225,7 @@ class KubernetesCodeExecutor:
                                 "name": "workspace",
                                 "emptyDir": {
                                     "medium": "Memory",
-                                    "sizeLimit": config.workspace_size_limit,
+                                    "sizeLimit": config.file_size_limit,
                                 },
                             }
                         ],

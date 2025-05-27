@@ -52,8 +52,7 @@ Executes arbitrary Python code in a sandboxed environment, with on-the-fly insta
     "chat_id": "unique_session_id",
     "persistent_workspace": true,
     "max_downloads": 5,
-    "expires_days": 7,
-    "expires_seconds": 3600
+    "expires_in": "30d"
 }
 ```
 
@@ -65,8 +64,7 @@ Executes arbitrary Python code in a sandboxed environment, with on-the-fly insta
 | `chat_id` | string | (Required) Unique identifier for the session |
 | `persistent_workspace` | boolean | (Optional) Whether to persist files created during execution |
 | `max_downloads` | integer | (Optional) Maximum number of downloads allowed for output files |
-| `expires_days` | integer | (Optional) Number of days until files expire |
-| `expires_seconds` | integer | (Optional) Number of seconds until files expire |
+| `expires_in` | str | (Optional) Number of seconds/minutes/hours/days/weeks until files expire |
 
 **Response:**
 ```json
@@ -93,12 +91,15 @@ Upload a file to be used in code execution.
 
 **Endpoint:** `POST /v1/upload`
 
-**Form Data:**
-- `chat_id`: (Required) Unique identifier for the session
-- `upload`: (Required) File to upload
-- `max_downloads`: (Optional) Maximum number of downloads allowed
-- `expires_days`: (Optional) Number of days until file expires
-- `expires_seconds`: (Optional) Number of seconds until file expires
+**Request Body:**
+```json
+{
+    "chat_id": "unique_session_id",
+    "upload": "hash_of_file",
+    "max_downloads": "2",
+    "expires_in": "5d",
+}
+```
 
 **Response:**
 ```json
@@ -217,7 +218,7 @@ The service can be configured using environment variables with the `APP_` prefix
 | `APP_GLOBAL_MAX_DOWNLOADS` | integer | `0` | Default download limit (0 = unlimited) |
 | `APP_INTERNAL_HOST_ALLOWLIST` | list | `[]` | Hosts allowed to execute code when public spawn is disabled |
 | `APP_INTERNAL_IP_ALLOWLIST` | list | `[]` | IPs allowed to execute code when public spawn is disabled |
-| `APP_WORKSPACE_SIZE_LIMIT` | string | `1Gi` | Kubernetes storage limit for /workspace before user receives an out of storage error. |
+| `APP_FILE_SIZE_LIMIT` | string | `1Gi` | Kubernetes + file storage limit for individual files and /workspace before user receives an out of storage error. |
 
 For TLS configuration:
 - `APP_GRPC_TLS_CERT`: TLS certificate content

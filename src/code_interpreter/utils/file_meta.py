@@ -1,10 +1,11 @@
-import datetime
+from datetime import datetime
 import os
 import sqlite3
 import logging
 from pathlib import Path
 from typing import Optional
 from code_interpreter.config import Config
+from code_interpreter.utils.validation import parse_duration
 
 config = Config()
 os.makedirs(config.file_storage_path, exist_ok=True)
@@ -12,7 +13,6 @@ _DB = Path(config.file_storage_path) / "file_mgmt_db.sqlite3"
 _CONN = sqlite3.connect(_DB, check_same_thread=False, isolation_level=None)
 _CONN.execute("PRAGMA journal_mode=WAL;")
 
-# Update schema to include filename
 _CONN.execute("""
     CREATE TABLE IF NOT EXISTS files (
         file_hash      TEXT,
@@ -26,37 +26,22 @@ _CONN.execute("""
 
 logger = logging.getLogger("code_interpreter_service")
 
+def _expiry_timestamp(expires_in: str | None) -> str | None:
+    delta = parse_duration(expires_in)
+    return (datetime.now() + delta).isoformat() if delta else None
+
 def register(
     file_hash: str,
     chat_id: str,
     filename: str,
     max_downloads: int | None = None,
-    days_to_expire: int | None = None,
-    expires_seconds: int | None = None,
+    expires_in: str | None = None,
 ) -> None:
-    """
-    Insert or update a file-metadata row.
-    """
     if not file_hash or not chat_id or not filename:
-        raise TypeError(
-            f"Invalid parameters for file registration: "
-            f"hash={file_hash}, chat_id={chat_id}, filename={filename}"
-        )
+        raise TypeError("hash/chat_id/filename must be non-empty")
 
-    # ---------------- download‑limit -------------------------------------
-    if max_downloads is None:
-        max_downloads = config.global_max_downloads
-    remaining: int | None = None if max_downloads == 0 else max_downloads
-
-    # ---------------- expiry timestamp -----------------------------------
-    expires_at: str | None = None
-    choices: list[datetime.timedelta] = []
-    if days_to_expire and days_to_expire > 0:
-        choices.append(datetime.timedelta(days=days_to_expire))
-    if expires_seconds and expires_seconds > 0:
-        choices.append(datetime.timedelta(seconds=expires_seconds))
-    if choices:
-        expires_at = (datetime.datetime.now() + min(choices)).isoformat()
+    remaining = None if (max_downloads or 0) == 0 else max_downloads
+    expires_at = _expiry_timestamp(expires_in)
 
     try:
         _CONN.execute(
@@ -69,16 +54,16 @@ def register(
             """,
             (file_hash, chat_id, filename, remaining, expires_at),
         )
-        dl_txt  = "unlimited" if remaining is None else remaining
-        exp_txt = expires_at or "never"
-        logger.debug(
-            "Registered %s/%s (%s) - dl=%s, exp=%s",
-            chat_id, file_hash, filename, dl_txt, exp_txt
+        logger.info(
+            "Registered %s/%s (%s) - dl=%s exp=%s",
+            chat_id,
+            file_hash,
+            filename,
+            "∞" if remaining is None else remaining,
+            expires_at or "never",
         )
     except Exception as exc:
-        logger.error("Error registering file: %s", exc, exc_info=True)
-
-
+        logger.error("DB register failed: %s", exc, exc_info=True)
 
 def check_and_decrement(file_hash: str, chat_id: str, filename: str) -> None:
     """Check if a file can be downloaded and decrement its download counter"""
@@ -94,8 +79,8 @@ def check_and_decrement(file_hash: str, chat_id: str, filename: str) -> None:
 
     if expires_at is not None:
         try:
-            expiry_date = datetime.datetime.fromisoformat(expires_at)
-            if datetime.datetime.now() > expiry_date:
+            expiry_date = datetime.fromisoformat(expires_at)
+            if datetime.now() > expiry_date:
                 # Set remaining to 0 on expiry rather than deleting
                 _CONN.execute(
                     "UPDATE files SET remaining = 0 WHERE file_hash = ? AND chat_id = ? AND filename = ?;", 

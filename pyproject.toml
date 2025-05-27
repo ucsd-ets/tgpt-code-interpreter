@@ -24,6 +24,7 @@ uvicorn = "^0.31.1"
 json-repair = "^0.42.0"
 fastjsonschema = "^2.21.1"
 python-multipart = "^0.0.20"
+kubernetes = "^32.0.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"

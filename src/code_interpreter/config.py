@@ -99,6 +99,6 @@ class Config(BaseSettings):
     # file downloads, 0 = unlimited
     global_max_downloads: int = 0
 
-    workspace_size_limit: str = "1Gi"
+    file_size_limit: str = "1Gi"
 
 
