@@ -86,6 +86,8 @@ RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/t
     py3-tabulate-pyc \
     py3-xarray \
     py3-xarray-pyc \
+    py3-plotly \
+    py3-sklearn \
     weasyprint \
     xonsh \
     xonsh-pyc \
