@@ -87,7 +87,7 @@ RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/t
     py3-xarray \
     py3-xarray-pyc \
     py3-plotly \
-    py3-sklearn \
+    py3-scikit-learn \
     weasyprint \
     xonsh \
     xonsh-pyc \
@@ -103,7 +103,7 @@ RUN echo "executor:x:${UID}:${UID}::/home/executor:" >> /etc/passwd && \
 USER executor
 
 # Cache fonts
-RUN fc-cache -fv && python3 -c "import matplotlib.pyplot"
+RUN fc-cache -fv && python3 -c "import matplotlib.pyplot" && python3 -c "from sklearn.preprocessing import StandardScaler"
 
 # Python virtual environment
 ARG PYTHON_VERSION
