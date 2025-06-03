@@ -442,6 +442,9 @@ def create_http_server(
         raw_request: Request, request: ParseCustomToolRequest, request_id: str = Depends(set_request_id)
     ):
         _guard_spawn(raw_request)
+
+        raise HTTPException(401, "Method disabled")
+
         logger.info("Parsing custom tool with source code %s", request.tool_source_code)
         custom_tool = custom_tool_executor.parse(
             tool_source_code=request.tool_source_code
@@ -472,6 +475,9 @@ def create_http_server(
         request_id: str = Depends(set_request_id),
     ):
         _guard_spawn(raw_request)
+
+        raise HTTPException(401, "Method disabled")
+
         logger.info(
             "Executing custom tool with source code %s", request.tool_source_code
         )

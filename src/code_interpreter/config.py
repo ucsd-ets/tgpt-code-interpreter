@@ -92,7 +92,7 @@ class Config(BaseSettings):
 
     internal_host_allowlist: list[str] = []
 
-    internal_ip_allowlist: list[str] = [] # default internal UCSD IP range?
+    internal_ip_allowlist: list[str] = []
 
     require_chat_id: bool = True
 
