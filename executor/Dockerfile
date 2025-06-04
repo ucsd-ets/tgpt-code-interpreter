@@ -43,6 +43,8 @@ RUN apk add --no-cache gcc musl-dev linux-headers make g++ clang-dev python3 pyt
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS runtime
 RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+    gcompat \
+    ttf-freefont \
     bash \
     coreutils \
     ffmpeg \
@@ -103,7 +105,7 @@ RUN echo "executor:x:${UID}:${UID}::/home/executor:" >> /etc/passwd && \
 USER executor
 
 # Cache fonts
-RUN fc-cache -fv && python3 -c "import matplotlib.pyplot" && python3 -c "from sklearn.preprocessing import StandardScaler"
+RUN fc-cache -fv && python3 -c "import matplotlib.pyplot"
 
 # Python virtual environment
 ARG PYTHON_VERSION
@@ -111,6 +113,9 @@ RUN python3 -m venv --system-site-packages /venv
 COPY requirements.txt requirements-skip.txt /
 RUN /venv/bin/pip install --no-cache-dir -r /requirements.txt && \
     /venv/bin/pip install --no-cache-dir cowsay
+
+# Test TGPT EDA packages
+RUN python3 -c "from sklearn.preprocessing import StandardScaler"
 
 # Site customization for Python ${PYTHON_VERSION}
 ARG MAJOR_PYTHON_VERSION

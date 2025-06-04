@@ -1,3 +1,4 @@
 pandas[excel,plot,output-formatting,computation]
 PyPDF2
 cowsay
+kaleido==1.0.0rc15
