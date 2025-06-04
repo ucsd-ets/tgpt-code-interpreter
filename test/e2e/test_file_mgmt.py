@@ -257,8 +257,8 @@ def test_upload_too_large(http_client):
         "chat_id": (None, "huge_file_chat"),
         "upload": ("huge.bin", _FakeLargeFile(two_gib), "application/octet-stream"),
     }
-    r = http_client.post("/v1/upload", files=files)
-    assert r.status_code in {413, 419}
+    r = http_client.post("/v1/upload", files=files, timeout=120)
+    assert r.status_code == 413 and "File too large" in r.text
 
 
 def test_upload_then_execute(http_client):

@@ -220,17 +220,17 @@ def create_http_server(
                          config.file_size_limit, e, exc_info=True)
             max_bytes = 1_073_741_824
 
-        if upload.size and upload.size > max_bytes:
-            raise HTTPException(
-                413,
-                f"File too large (>{config.file_size_limit}).",
-            )
-
-        try:
+        try:  
+            bytes_seen = 0
             async with code_executor.file_storage.writer(
                 filename=upload.filename, chat_id=chat_id
             ) as dest:
                 while chunk := await upload.read(8192):
+                    bytes_seen += len(chunk)
+                    if bytes_seen > max_bytes:
+                        # TODO: Add abort to clean up temp files
+                        # TODO: Add test to ensure temp files are cleaned
+                        raise HTTPException(413, "File too large")
                     await dest.write(chunk)
 
             register(

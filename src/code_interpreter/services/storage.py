@@ -50,6 +50,7 @@ class Storage:
             file.__setattr__("hash", hash)
             file.__setattr__("filename", filename)
             file.__setattr__("chat_id", chat_id)
+            # TODO: Add abort to clean up tmp files
             yield file
 
     async def write(self, data: bytes, filename: str, chat_id: str) -> str:
