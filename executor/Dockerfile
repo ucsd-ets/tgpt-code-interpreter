@@ -43,6 +43,10 @@ RUN apk add --no-cache gcc musl-dev linux-headers make g++ clang-dev python3 pyt
 
 FROM docker.io/alpine:${ALPINE_VERSION} AS runtime
 RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+    nano \
+    vim \
+    git \
+    libexpat \
     gcompat \
     ttf-freefont \
     bash \
@@ -54,6 +58,7 @@ RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/t
     opencv \
     pandoc-cli \
     python3 \
+    py3-uv \
     py3-ffmpeg \
     py3-ffmpeg-pyc \
     py3-jinja2 \
@@ -88,13 +93,28 @@ RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/t
     py3-tabulate-pyc \
     py3-xarray \
     py3-xarray-pyc \
-    py3-plotly \
     py3-scikit-learn \
     py3-statsmodels \
     weasyprint \
     xonsh \
     xonsh-pyc \
-    yt-dlp
+    yt-dlp \
+    nss \
+    libatk-bridge-2.0 \
+    cups-libs \
+    libxcomposite \ 
+    libxdamage \ 
+    libxfixes \ 
+    libxrandr \ 
+    mesa-gbm \ 
+    libxkbcommon \ 
+    libxkbcommon-x11 \
+    pango \ 
+    cairo \ 
+    alsa-lib \
+    chromium \
+    chromium-chromedriver \
+    libdrm
 
 # Create user manually -- Alpine does not support high UIDs
 ARG UID
@@ -125,6 +145,9 @@ COPY sitecustomize.py /venv/lib/python${MAJOR_PYTHON_VERSION}/site-packages/
 # Environment variables
 ENV PATH="/venv/bin:$PATH"
 ENV PYTHONPATH="/venv/lib/python${MAJOR_PYTHON_VERSION}/site-packages/"
+ENV KAL_CHROME_PATH=/usr/bin/chromium-browser  \
+    CHROME_PATH=/usr/bin/chromium-browser      \
+    BROWSER_EXECUTABLE=/usr/bin/chromium-browser
 
 # Pandoc wrapper
 COPY pandoc-wrapper /usr/local/bin/pandoc
@@ -146,6 +169,10 @@ COPY --from=build-pymupdf /out/. /venv/lib/python${MAJOR_PYTHON_VERSION}/site-pa
 
 # Executor server binary
 COPY --from=build-executor-server /workdir/target/release/executor-server /usr/local/bin/executor-server
+
+# misc
+# RUN plotly_get_chrome -y
+RUN pip install --upgrade pip
 
 WORKDIR /workspace
 ENTRYPOINT [ "executor-server" ]
