@@ -197,7 +197,6 @@ def create_http_server(
         request_id_context_var.set(request_id)
         return request_id
 
-    # TODO: Fix malicious uploading, dont just read limit field
     @app.post("/v1/upload", response_model=UploadResponse)
     async def upload_file(
         raw_request: Request,
@@ -228,8 +227,6 @@ def create_http_server(
                 while chunk := await upload.read(8192):
                     bytes_seen += len(chunk)
                     if bytes_seen > max_bytes:
-                        # TODO: Add abort to clean up temp files
-                        # TODO: Add test to ensure temp files are cleaned
                         raise HTTPException(413, "File too large")
                     await dest.write(chunk)
 

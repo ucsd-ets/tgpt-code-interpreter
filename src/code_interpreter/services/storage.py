@@ -28,30 +28,28 @@ class Storage:
         self.storage_path = Path(storage_path)
 
     @asynccontextmanager
-    async def writer(self, filename: str, chat_id: str) -> AsyncIterator[ObjectWriter]:
-        """
-        Async context manager for writing a new object to the storage.
-        
-        Args:
-            filename: Original filename to preserve
-            chat_id: ID of the chat this file belongs to
-        """
-        # Randomly generated HASH
-        hash = secrets.token_hex(32)
-        
-        # Create directory structure
+    async def writer(self, filename: str, chat_id: str):
+        hash_ = secrets.token_hex(32)
+
         chat_dir = self.storage_path / chat_id
-        hash_dir = chat_dir / hash
+        hash_dir = chat_dir / hash_
         await chat_dir.mkdir(parents=True, exist_ok=True)
         await hash_dir.mkdir(exist_ok=True)
-        
+
         file_path = hash_dir / filename
-        async with await file_path.open("wb") as file:
-            file.__setattr__("hash", hash)
-            file.__setattr__("filename", filename)
-            file.__setattr__("chat_id", chat_id)
-            # TODO: Add abort to clean up tmp files
-            yield file
+
+        try:
+            async with await file_path.open("wb") as f:
+                # expose a few attrs to callers for convenience
+                f.hash = hash_
+                f.filename = filename
+                f.chat_id = chat_id
+                yield f
+        except Exception:
+            if await file_path.exists():
+                await file_path.unlink()
+            await hash_dir.rmdir()
+            raise      
 
     async def write(self, data: bytes, filename: str, chat_id: str) -> str:
         """
