@@ -78,7 +78,7 @@ class Storage:
         target_file = target_dir / filename
         
         if not object_hash or not await target_file.exists():
-            raise FileNotFoundError(f"File not found: {chat_id}/{object_hash}/{filename}")
+            raise FileNotFoundError(f"File not found: {target_file}")
             
         async with await target_file.open("rb") as f:
             yield f

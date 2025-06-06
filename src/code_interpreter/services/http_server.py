@@ -243,7 +243,7 @@ def create_http_server(
             logger.info(
                 "Uploaded %s (%d bytes) to chat %s (dl=%s, exp=%s)",
                 upload.filename,
-                upload.size or -1,
+                bytes_seen,
                 chat_id,
                 meta['remaining_downloads'] or "∞",
                 meta['expires_at'] or "never",
