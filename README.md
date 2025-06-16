@@ -1,3 +1,7 @@
+# ARCHIVED
+
+This repo has been archived. For all UCSD staff, please check Bitbucket for a continuation of this project.
+
 <h1 align="left">TritonGPT (based on BeeAI) Code Interpreter</h1>
 
 <p align="left">
